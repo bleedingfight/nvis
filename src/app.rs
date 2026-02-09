@@ -1,4 +1,5 @@
 use crate::db::{NsysDatabase, TableData};
+use crate::i18n::{t, Language, TextKey};
 use crate::timeline::Timeline;
 use crate::visualization::Visualization;
 use eframe::egui;
@@ -27,14 +28,14 @@ impl LogLevel {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    fn as_str(self, lang: Language) -> &'static str {
         match self {
-            LogLevel::Off => "关闭",
-            LogLevel::Error => "错误",
-            LogLevel::Warn => "警告",
-            LogLevel::Info => "信息",
-            LogLevel::Debug => "调试",
-            LogLevel::Trace => "追踪",
+            LogLevel::Off => t(TextKey::LogLevelOff, lang),
+            LogLevel::Error => t(TextKey::LogLevelError, lang),
+            LogLevel::Warn => t(TextKey::LogLevelWarn, lang),
+            LogLevel::Info => t(TextKey::LogLevelInfo, lang),
+            LogLevel::Debug => t(TextKey::LogLevelDebug, lang),
+            LogLevel::Trace => t(TextKey::LogLevelTrace, lang),
         }
     }
 
@@ -66,6 +67,9 @@ pub struct NsysViewerApp {
     show_table_panel: bool,
     show_visualization_panel: bool,
     table_panel_height_ratio: f32, // 表格面板高度比例 (0.0 - 1.0)
+    // 语言设置
+    language: Language,
+    show_language_settings: bool,
 }
 
 impl Default for NsysViewerApp {
@@ -86,6 +90,8 @@ impl Default for NsysViewerApp {
             show_table_panel: true,
             show_visualization_panel: true,
             table_panel_height_ratio: 0.5, // 默认各占一半
+            language: Language::default(), // 默认英文
+            show_language_settings: false,
         }
     }
 }
@@ -106,20 +112,33 @@ impl eframe::App for NsysViewerApp {
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("NSYS Profile Viewer");
+                ui.heading(t(TextKey::AppTitle, self.language));
                 ui.separator();
 
                 if let Some(path) = &self.file_path {
-                    ui.label(format!("文件: {}", path.display()));
+                    ui.label(format!(
+                        "{} {}",
+                        t(TextKey::FileLabel, self.language),
+                        path.display()
+                    ));
                 } else {
-                    ui.label("拖放 SQLite 文件到窗口");
+                    ui.label(t(TextKey::DragDropHint, self.language));
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // 日志设置按钮
-                    if ui.button("⚙ 日志设置").clicked() {
+                    if ui.button(t(TextKey::LogSettings, self.language)).clicked() {
                         self.show_log_settings = !self.show_log_settings;
                         log::debug!("切换日志设置面板: {}", self.show_log_settings);
+                    }
+
+                    // 语言设置按钮
+                    if ui
+                        .button(t(TextKey::LanguageSettings, self.language))
+                        .clicked()
+                    {
+                        self.show_language_settings = !self.show_language_settings;
+                        log::debug!("切换语言设置面板: {}", self.show_language_settings);
                     }
                 });
             });
@@ -127,18 +146,21 @@ impl eframe::App for NsysViewerApp {
 
         // 日志设置窗口
         if self.show_log_settings {
-            egui::Window::new("日志设置")
+            egui::Window::new(t(TextKey::LogLevelTitle, self.language))
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.heading("日志等级");
+                    ui.heading(t(TextKey::LogLevelTitle, self.language));
                     ui.separator();
 
                     let current_level = self.log_level;
 
                     for level in LogLevel::all_levels() {
                         let is_selected = level == current_level;
-                        if ui.selectable_label(is_selected, level.as_str()).clicked() {
+                        if ui
+                            .selectable_label(is_selected, level.as_str(self.language))
+                            .clicked()
+                        {
                             self.log_level = level;
                             log::set_max_level(level.to_level_filter());
                             log::warn!("日志等级已更改为: {:?}", level);
@@ -146,17 +168,46 @@ impl eframe::App for NsysViewerApp {
                     }
 
                     ui.separator();
-                    ui.label("说明:");
-                    ui.label("• 关闭: 不记录任何日志");
-                    ui.label("• 错误: 仅记录错误信息");
-                    ui.label("• 警告: 记录警告和错误");
-                    ui.label("• 信息: 记录一般信息");
-                    ui.label("• 调试: 记录调试信息(推荐)");
-                    ui.label("• 追踪: 记录详细追踪信息");
+                    ui.label(t(TextKey::LogDescription, self.language));
+                    ui.label(t(TextKey::LogDescOff, self.language));
+                    ui.label(t(TextKey::LogDescError, self.language));
+                    ui.label(t(TextKey::LogDescWarn, self.language));
+                    ui.label(t(TextKey::LogDescInfo, self.language));
+                    ui.label(t(TextKey::LogDescDebug, self.language));
+                    ui.label(t(TextKey::LogDescTrace, self.language));
 
                     ui.separator();
-                    if ui.button("关闭").clicked() {
+                    if ui.button(t(TextKey::Close, self.language)).clicked() {
                         self.show_log_settings = false;
+                    }
+                });
+        }
+
+        // 语言设置窗口
+        if self.show_language_settings {
+            egui::Window::new(t(TextKey::LanguageTitle, self.language))
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.heading(t(TextKey::LanguageTitle, self.language));
+                    ui.separator();
+
+                    ui.label(t(TextKey::LanguageDescription, self.language));
+                    ui.separator();
+
+                    let current_lang = self.language;
+
+                    for lang in Language::all_languages() {
+                        let is_selected = lang == current_lang;
+                        if ui.selectable_label(is_selected, lang.name()).clicked() {
+                            self.language = lang;
+                            log::info!("语言已切换为: {} ({})", lang.name(), lang.code());
+                        }
+                    }
+
+                    ui.separator();
+                    if ui.button(t(TextKey::Close, self.language)).clicked() {
+                        self.show_language_settings = false;
                     }
                 });
         }
@@ -165,21 +216,43 @@ impl eframe::App for NsysViewerApp {
         egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if let Some(err) = &self.error_message {
-                    ui.colored_label(egui::Color32::RED, format!("错误: {}", err));
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!("{} {}", t(TextKey::Error, self.language), err),
+                    );
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(duration) = self.timeline.get_selected_duration() {
-                        ui.label(format!("选中时间范围: {:.3} ms", duration / 1_000_000.0));
-                        if ui.button("清除选择").clicked() {
+                        ui.label(format!(
+                            "{} {:.3} ms",
+                            t(TextKey::SelectedTimeRange, self.language),
+                            duration / 1_000_000.0
+                        ));
+                        if ui
+                            .button(t(TextKey::ClearSelection, self.language))
+                            .clicked()
+                        {
                             log::debug!("清除时间线选择");
                             self.timeline.clear_selection();
                         }
                     }
 
-                    ui.label(format!("函数调用: {}", self.db.function_calls.len()));
-                    ui.label(format!("数据表: {}", self.db.tables.len()));
-                    ui.label(format!("日志: {}", self.log_level.as_str()));
+                    ui.label(format!(
+                        "{} {}",
+                        t(TextKey::FunctionCalls, self.language),
+                        self.db.function_calls.len()
+                    ));
+                    ui.label(format!(
+                        "{} {}",
+                        t(TextKey::DataTables, self.language),
+                        self.db.tables.len()
+                    ));
+                    ui.label(format!(
+                        "{} {}",
+                        t(TextKey::LogLevel, self.language),
+                        self.log_level.as_str(self.language)
+                    ));
                 });
             });
         });
@@ -191,12 +264,12 @@ impl eframe::App for NsysViewerApp {
         egui::SidePanel::left("left_panel")
             .min_width(200.0)
             .show(ctx, |ui| {
-                ui.heading("数据表");
+                ui.heading(t(TextKey::DataTables, self.language));
                 ui.separator();
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if self.db.tables.is_empty() {
-                        ui.colored_label(egui::Color32::GRAY, "暂无数据");
+                        ui.colored_label(egui::Color32::GRAY, t(TextKey::NoData, self.language));
                     } else {
                         for table in &self.db.tables {
                             let is_selected = self.selected_table.as_ref() == Some(&table.name);
@@ -217,7 +290,7 @@ impl eframe::App for NsysViewerApp {
 
                 ui.separator();
 
-                if ui.button("重新加载").clicked() {
+                if ui.button(t(TextKey::Reload, self.language)).clicked() {
                     log::info!("用户点击重新加载按钮");
                     should_reload = true;
                 }
@@ -248,37 +321,40 @@ impl eframe::App for NsysViewerApp {
 
                 // 顶部控制栏
                 ui.horizontal(|ui| {
-                    ui.heading(format!("表: {}", table_name_str));
+                    ui.heading(format!(
+                        "{}: {}",
+                        t(TextKey::Table, self.language),
+                        table_name_str
+                    ));
                     ui.separator();
 
                     // 面板切换按钮
-                    if ui
-                        .button(if self.show_table_panel {
-                            "✓ 表格"
-                        } else {
-                            "表格"
-                        })
-                        .clicked()
-                    {
+                    let table_btn_text = if self.show_table_panel {
+                        format!("✓ {}", t(TextKey::Table, self.language))
+                    } else {
+                        t(TextKey::Table, self.language).to_string()
+                    };
+                    if ui.button(table_btn_text).clicked() {
                         self.show_table_panel = !self.show_table_panel;
                         log::debug!("切换表格面板: {}", self.show_table_panel);
                     }
 
-                    if ui
-                        .button(if self.show_visualization_panel {
-                            "✓ 可视化"
-                        } else {
-                            "可视化"
-                        })
-                        .clicked()
-                    {
+                    let viz_btn_text = if self.show_visualization_panel {
+                        format!("✓ {}", t(TextKey::Visualization, self.language))
+                    } else {
+                        t(TextKey::Visualization, self.language).to_string()
+                    };
+                    if ui.button(viz_btn_text).clicked() {
                         self.show_visualization_panel = !self.show_visualization_panel;
                         log::debug!("切换可视化面板: {}", self.show_visualization_panel);
                     }
 
                     ui.separator();
 
-                    if ui.button("返回时间线").clicked() {
+                    if ui
+                        .button(t(TextKey::BackToTimeline, self.language))
+                        .clicked()
+                    {
                         log::info!("用户点击返回时间线");
                         should_clear_selection = true;
                     }
@@ -301,20 +377,20 @@ impl eframe::App for NsysViewerApp {
                     // 两个都不显示
                     ui.vertical_centered(|ui| {
                         ui.add_space(200.0);
-                        ui.heading("请至少启用一个面板");
-                        ui.label("点击上方的「表格」或「可视化」按钮");
+                        ui.heading(t(TextKey::EnableAtLeastOnePanel, self.language));
+                        ui.label(t(TextKey::ClickToEnablePanel, self.language));
                     });
                 }
             } else {
                 // 显示时间线
-                ui.heading("时间线");
+                ui.heading(t(TextKey::Timeline, self.language));
                 ui.separator();
 
                 if self.db.function_calls.is_empty() {
                     ui.vertical_centered(|ui| {
                         ui.add_space(200.0);
-                        ui.heading("没有函数调用数据");
-                        ui.label("请拖放一个包含性能分析数据的 SQLite 文件");
+                        ui.heading(t(TextKey::NoFunctionCallData, self.language));
+                        ui.label(t(TextKey::DragDropPrompt, self.language));
                     });
                 } else {
                     // 获取可见范围内的调用
@@ -361,13 +437,20 @@ impl NsysViewerApp {
 
                 if self.db.function_calls.is_empty() {
                     log::warn!("未找到函数调用数据");
-                    self.error_message =
-                        Some("未找到函数调用数据，请确保这是一个有效的 NSYS 输出文件".to_string());
+                    self.error_message = Some(format!(
+                        "{}, {}",
+                        t(TextKey::NoFunctionCallDataFound, self.language),
+                        t(TextKey::InvalidNsysFile, self.language)
+                    ));
                 }
             }
             Err(e) => {
                 log::error!("加载数据库失败: {}", e);
-                self.error_message = Some(format!("加载数据库失败: {}", e));
+                self.error_message = Some(format!(
+                    "{} {}",
+                    t(TextKey::LoadDatabaseFailed, self.language),
+                    e
+                ));
             }
         }
     }
@@ -387,7 +470,11 @@ impl NsysViewerApp {
                 }
                 Err(e) => {
                     log::error!("加载表数据失败: {}", e);
-                    self.error_message = Some(format!("加载表数据失败: {}", e));
+                    self.error_message = Some(format!(
+                        "{} {}",
+                        t(TextKey::LoadTableDataFailed, self.language),
+                        e
+                    ));
                     self.table_data = None;
                 }
             }
@@ -406,7 +493,11 @@ impl NsysViewerApp {
                 }
                 Err(e) => {
                     log::error!("加载页面失败: {}", e);
-                    self.error_message = Some(format!("加载页面失败: {}", e));
+                    self.error_message = Some(format!(
+                        "{} {}",
+                        t(TextKey::LoadPageFailed, self.language),
+                        e
+                    ));
                 }
             }
         }
@@ -428,9 +519,12 @@ impl NsysViewerApp {
             .height_range(100.0..=available_height - 100.0)
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.strong("📊 表格数据");
+                    ui.strong(format!("📊 {}", t(TextKey::TableData, self.language)));
                     ui.separator();
-                    if ui.button("🔄 重置视图").clicked() {
+                    if ui
+                        .button(format!("🔄 {}", t(TextKey::ResetView, self.language)))
+                        .clicked()
+                    {
                         self.table_panel_height_ratio = 0.5;
                         log::debug!("重置面板比例为 50:50");
                     }
@@ -443,7 +537,7 @@ impl NsysViewerApp {
                     ui.vertical_centered(|ui| {
                         ui.add_space(50.0);
                         ui.spinner();
-                        ui.label("正在加载表数据...");
+                        ui.label(t(TextKey::Loading, self.language));
                     });
                 }
             });
@@ -451,15 +545,22 @@ impl NsysViewerApp {
         // 可视化面板（下半部分）
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.strong("📈 数据可视化");
+                ui.strong(format!(
+                    "📈 {}",
+                    t(TextKey::DataVisualization, self.language)
+                ));
                 ui.separator();
-                if ui.button("🔄 重置缩放").clicked() {
+                if ui
+                    .button(format!("🔄 {}", t(TextKey::ResetZoom, self.language)))
+                    .clicked()
+                {
                     self.visualization.reset_view();
                 }
             });
             ui.separator();
 
-            self.visualization.render(ui, self.table_data.as_ref());
+            self.visualization
+                .render(ui, self.table_data.as_ref(), self.language);
         });
     }
 
@@ -470,7 +571,7 @@ impl NsysViewerApp {
         table_name: &str,
         next_page: &mut Option<usize>,
     ) {
-        ui.strong("📊 表格数据");
+        ui.strong(format!("📊 {}", t(TextKey::TableData, self.language)));
         ui.separator();
 
         if let Some(data) = &self.table_data {
@@ -479,7 +580,7 @@ impl NsysViewerApp {
             ui.vertical_centered(|ui| {
                 ui.add_space(200.0);
                 ui.spinner();
-                ui.label("正在加载表数据...");
+                ui.label(t(TextKey::Loading, self.language));
             });
         }
     }
@@ -487,15 +588,22 @@ impl NsysViewerApp {
     /// 仅渲染可视化面板
     fn render_visualization_only(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.strong("📈 数据可视化");
+            ui.strong(format!(
+                "📈 {}",
+                t(TextKey::DataVisualization, self.language)
+            ));
             ui.separator();
-            if ui.button("🔄 重置缩放").clicked() {
+            if ui
+                .button(format!("🔄 {}", t(TextKey::ResetZoom, self.language)))
+                .clicked()
+            {
                 self.visualization.reset_view();
             }
         });
         ui.separator();
 
-        self.visualization.render(ui, self.table_data.as_ref());
+        self.visualization
+            .render(ui, self.table_data.as_ref(), self.language);
     }
 
     /// 渲染表格及分页控制
@@ -508,27 +616,50 @@ impl NsysViewerApp {
     ) {
         // 分页控制
         ui.horizontal(|ui| {
-            ui.label(format!("页码: {}", self.current_page + 1));
+            ui.label(format!(
+                "{} {}",
+                t(TextKey::PageNumber, self.language),
+                self.current_page + 1
+            ));
             ui.separator();
 
-            if ui.button("⏮ 上一页").clicked() && self.current_page > 0 {
+            if ui
+                .button(format!("⏮ {}", t(TextKey::PreviousPage, self.language)))
+                .clicked()
+                && self.current_page > 0
+            {
                 log::debug!("用户点击上一页，当前页: {}", self.current_page);
                 *next_page = Some(self.current_page - 1);
             }
 
-            if ui.button("下一页 ⏭").clicked() {
+            if ui
+                .button(format!("{} ⏭", t(TextKey::NextPage, self.language)))
+                .clicked()
+            {
                 log::debug!("用户点击下一页，当前页: {}", self.current_page);
                 *next_page = Some(self.current_page + 1);
             }
 
             ui.separator();
-            ui.label(format!("每页显示: {} 行", self.page_size));
+            ui.label(format!(
+                "{} {}",
+                t(TextKey::RowsPerPage, self.language),
+                self.page_size
+            ));
 
             // 获取总行数
             if let Some(table_info) = self.db.tables.iter().find(|t| t.name == table_name) {
                 let total_pages = (table_info.row_count + self.page_size - 1) / self.page_size;
-                ui.label(format!("总页数: {}", total_pages));
-                ui.label(format!("总行数: {}", table_info.row_count));
+                ui.label(format!(
+                    "{} {}",
+                    t(TextKey::TotalPages, self.language),
+                    total_pages
+                ));
+                ui.label(format!(
+                    "{} {}",
+                    t(TextKey::TotalRows, self.language),
+                    table_info.row_count
+                ));
             }
         });
 

@@ -1,5 +1,6 @@
 mod app;
 mod db;
+mod i18n;
 mod timeline;
 mod visualization;
 

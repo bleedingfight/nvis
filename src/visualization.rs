@@ -1,4 +1,5 @@
 use crate::db::TableData;
+use crate::i18n::{t, Language, TextKey};
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 
@@ -26,7 +27,7 @@ impl Visualization {
     }
 
     /// 渲染可视化内容
-    pub fn render(&mut self, ui: &mut egui::Ui, data: Option<&TableData>) {
+    pub fn render(&mut self, ui: &mut egui::Ui, data: Option<&TableData>, language: Language) {
         let available_size = ui.available_size();
 
         // 创建绘图区域
@@ -74,14 +75,14 @@ impl Visualization {
 
         // 如果有数据，绘制可视化
         if let Some(table_data) = data {
-            self.draw_data_visualization(&painter, rect, table_data);
+            self.draw_data_visualization(&painter, rect, table_data, language);
         } else {
             // 显示提示信息
-            self.draw_placeholder(&painter, rect);
+            self.draw_placeholder(&painter, rect, language);
         }
 
         // 显示控制信息
-        self.draw_controls(&painter, rect);
+        self.draw_controls(&painter, rect, language);
     }
 
     /// 绘制网格背景
@@ -116,7 +117,13 @@ impl Visualization {
     }
 
     /// 绘制数据可视化
-    fn draw_data_visualization(&self, painter: &egui::Painter, rect: Rect, data: &TableData) {
+    fn draw_data_visualization(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        data: &TableData,
+        language: Language,
+    ) {
         log::trace!(
             "绘制可视化: {} 列, {} 行",
             data.columns.len(),
@@ -136,13 +143,13 @@ impl Visualization {
 
         if numeric_columns.len() >= 2 {
             // 如果有至少两个数值列，绘制散点图
-            self.draw_scatter_plot(painter, rect, data, &numeric_columns);
+            self.draw_scatter_plot(painter, rect, data, &numeric_columns, language);
         } else if numeric_columns.len() == 1 {
             // 如果有一个数值列，绘制柱状图
-            self.draw_bar_chart(painter, rect, data, numeric_columns[0]);
+            self.draw_bar_chart(painter, rect, data, numeric_columns[0], language);
         } else {
             // 否则显示数据摘要
-            self.draw_data_summary(painter, rect, data);
+            self.draw_data_summary(painter, rect, data, language);
         }
     }
 
@@ -178,6 +185,7 @@ impl Visualization {
         rect: Rect,
         data: &TableData,
         numeric_columns: &[usize],
+        language: Language,
     ) {
         if numeric_columns.len() < 2 {
             return;
@@ -270,8 +278,13 @@ impl Visualization {
 
         // 显示数据范围
         let info_text = format!(
-            "X: [{:.2}, {:.2}]  Y: [{:.2}, {:.2}]  点数: {}",
-            x_min, x_max, y_min, y_max, points_count
+            "X: [{:.2}, {:.2}]  Y: [{:.2}, {:.2}]  {}: {}",
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            t(TextKey::Points, language),
+            points_count
         );
         painter.text(
             Pos2::new(rect.center().x, rect.top() + 20.0),
@@ -289,6 +302,7 @@ impl Visualization {
         rect: Rect,
         data: &TableData,
         col_idx: usize,
+        language: Language,
     ) {
         let mut values: Vec<f64> = Vec::new();
         for row in &data.rows {
@@ -345,20 +359,34 @@ impl Visualization {
         painter.text(
             Pos2::new(rect.center().x, rect.top() + 20.0),
             egui::Align2::CENTER_CENTER,
-            format!("{} - 柱状图", data.columns[col_idx]),
+            format!(
+                "{} - {}",
+                data.columns[col_idx],
+                t(TextKey::BarChart, language)
+            ),
             egui::FontId::proportional(14.0),
             Color32::BLACK,
         );
     }
 
     /// 绘制数据摘要
-    fn draw_data_summary(&self, painter: &egui::Painter, rect: Rect, data: &TableData) {
+    fn draw_data_summary(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        data: &TableData,
+        language: Language,
+    ) {
         let center = rect.center();
 
         let summary = format!(
-            "数据摘要\n\n列数: {}\n行数: {}\n\n提示: 需要数值类型的列才能生成图表",
+            "{}\n\n{} {}\n{} {}\n\n{}",
+            t(TextKey::DataSummary, language),
+            t(TextKey::Columns, language),
             data.columns.len(),
-            data.rows.len()
+            t(TextKey::Rows, language),
+            data.rows.len(),
+            t(TextKey::NumericColumnsHint, language)
         );
 
         painter.text(
@@ -371,21 +399,24 @@ impl Visualization {
     }
 
     /// 绘制占位符
-    fn draw_placeholder(&self, painter: &egui::Painter, rect: Rect) {
+    fn draw_placeholder(&self, painter: &egui::Painter, rect: Rect, language: Language) {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "选择数据表以显示可视化",
+            t(TextKey::SelectTableHint, language),
             egui::FontId::proportional(18.0),
             Color32::GRAY,
         );
     }
 
     /// 绘制控制信息
-    fn draw_controls(&self, painter: &egui::Painter, rect: Rect) {
+    fn draw_controls(&self, painter: &egui::Painter, rect: Rect, language: Language) {
         let controls_text = format!(
-            "缩放: {:.0}%  |  鼠标滚轮缩放  |  拖拽移动",
-            self.zoom * 100.0
+            "{} {:.0}%  |  {}  |  {}",
+            t(TextKey::ZoomControl, language),
+            self.zoom * 100.0,
+            t(TextKey::MouseWheelZoom, language),
+            t(TextKey::DragToMove, language)
         );
 
         painter.text(
