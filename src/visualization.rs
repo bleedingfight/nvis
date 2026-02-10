@@ -90,11 +90,20 @@ pub fn detect_table_type(table_name: &str, data: &TableData) -> VisualizationTyp
 
 /// 为CUDA API调用生成箱线图数据
 pub fn generate_boxplot_data(data: &TableData) -> Vec<BoxPlotData> {
-    // 找到name/function列
-    let name_col = data.columns.iter().position(|c| {
-        let cl = c.to_lowercase();
-        cl.contains("name") || cl.contains("function") || cl.contains("api")
-    });
+    // 找到name/function列（更严格：优先精确匹配，再次匹配包含但排除 nameId/id）
+    let lowered: Vec<String> = data.columns.iter().map(|c| c.to_lowercase()).collect();
+    let mut name_col: Option<usize> = None;
+    for exact in ["name", "function", "api", "apiname"] {
+        if let Some(idx) = lowered.iter().position(|c| c == exact) {
+            name_col = Some(idx);
+            break;
+        }
+    }
+    if name_col.is_none() {
+        name_col = lowered.iter().position(|c| {
+            (c.contains("function") || c.contains("api") || c.contains("name")) && !c.contains("id")
+        });
+    }
 
     if name_col.is_none() {
         return Vec::new();
@@ -105,7 +114,12 @@ pub fn generate_boxplot_data(data: &TableData) -> Vec<BoxPlotData> {
     // 找到duration列，或者start/end列来计算duration
     let duration_col = data.columns.iter().position(|c| {
         let cl = c.to_lowercase();
-        cl.contains("duration") || cl.contains("time") || cl.contains("elapsed")
+        // Prefer explicit duration columns, avoid start/end columns when matching generic 'time'
+        cl == "duration"
+            || cl.contains("duration")
+            || cl.contains("elapsed")
+            || (cl == "time")
+            || (cl.contains("time") && !cl.contains("start") && !cl.contains("end"))
     });
 
     let start_col = data
@@ -128,7 +142,7 @@ pub fn generate_boxplot_data(data: &TableData) -> Vec<BoxPlotData> {
 
     for row in &data.rows {
         if let Some(name) = row.get(name_idx) {
-            let duration = if let Some(dur_idx) = duration_col {
+            let duration_ns = if let Some(dur_idx) = duration_col {
                 // 直接从duration列获取
                 row.get(dur_idx).and_then(|v| v.parse::<f64>().ok())
             } else if let (Some(start_idx), Some(end_idx)) = (start_col, end_col) {
@@ -147,9 +161,9 @@ pub fn generate_boxplot_data(data: &TableData) -> Vec<BoxPlotData> {
                 None
             };
 
-            if let Some(dur_value) = duration {
+            if let Some(dur_value) = duration_ns {
                 if dur_value >= 0.0 {
-                    // 过滤负数duration
+                    // 使用纳秒为单位（ns）
                     groups
                         .entry(name.clone())
                         .or_insert_with(Vec::new)

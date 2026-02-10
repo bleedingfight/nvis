@@ -33,7 +33,8 @@ fn main() -> anyhow::Result<()> {
     println!("TEST 2: CUPTI_ACTIVITY_KIND_RUNTIME - BoxPlot Visualization");
     println!("{}", "=".repeat(70));
 
-    let table_data = nvis::db::load_table_data(db_path, "CUPTI_ACTIVITY_KIND_RUNTIME")?;
+    // Use resolved loader to get function names instead of nameId
+    let table_data = nvis::load_table_data_resolved(db_path, "CUPTI_ACTIVITY_KIND_RUNTIME")?;
     println!("Columns: {:?}", table_data.columns);
     println!("Rows loaded: {}", table_data.rows.len());
 

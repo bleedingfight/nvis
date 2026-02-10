@@ -11,6 +11,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     match app.state {
         AppState::FileSelection => draw_file_selection(f, app),
         AppState::TableView => draw_table_view(f, app),
+        AppState::StatsView => draw_stats_view(f, app),
     }
 }
 
@@ -210,87 +211,163 @@ fn draw_boxplot_chart(
         return;
     }
 
-    // 使用文本形式展示箱线图统计信息
+    // 绘制带坐标轴的箱线图：横轴为函数名（等距分布），纵轴为耗时(ns)
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let mut y = inner.y + 1;
-    let max_items = ((inner.height - 2) / 4) as usize;
+    // 布局：左侧给 y 轴与刻度，底部给 x 轴与标签
+    if inner.width < 24 || inner.height < 10 {
+        let paragraph = Paragraph::new("Area too small to draw chart");
+        f.render_widget(paragraph, inner);
+        return;
+    }
 
-    for boxplot in boxplots.iter().take(max_items) {
-        if y + 3 >= inner.y + inner.height {
-            break;
+    let y_axis_w = 12u16.min(inner.width / 3);
+    let x_axis_h = 3u16;
+    let plot_left = inner.x + y_axis_w;
+    let plot_top = inner.y + 1;
+    let plot_right = inner.x + inner.width.saturating_sub(2);
+    let plot_bottom = inner.y + inner.height.saturating_sub(1 + x_axis_h);
+    if plot_right <= plot_left || plot_bottom <= plot_top {
+        return;
+    }
+    let plot_w = plot_right - plot_left;
+    let plot_h = plot_bottom - plot_top;
+
+    // 限制函数数量，确保每个函数至少有 10 列宽度
+    let max_items = (plot_w / 10).max(1) as usize;
+    let items = boxplots.iter().take(max_items).collect::<Vec<_>>();
+    if items.is_empty() {
+        return;
+    }
+
+    // 全局 y 范围
+    let gmin = items.iter().map(|b| b.min).fold(f64::INFINITY, f64::min);
+    let gmax = items
+        .iter()
+        .map(|b| b.max)
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !(gmax > gmin) {
+        return;
+    }
+
+    let map_y = |v: f64| -> u16 {
+        let ratio = ((v - gmin) / (gmax - gmin)).clamp(0.0, 1.0);
+        plot_bottom - (ratio * plot_h as f64) as u16
+    };
+
+    // Y 轴与刻度
+    for yy in plot_top..=plot_bottom {
+        f.render_widget(Paragraph::new("│"), Rect::new(plot_left, yy, 1, 1));
+    }
+    let tick_n = 4u16; // 5 档
+    let fmt = |v: f64| -> String {
+        if v.abs() >= 1e9 {
+            format!("{:.1}e9", v / 1e9)
+        } else if v.abs() >= 1e6 {
+            format!("{:.1}e6", v / 1e6)
+        } else if v.abs() >= 1e3 {
+            format!("{:.1}e3", v / 1e3)
+        } else {
+            format!("{:.0}", v)
         }
+    };
+    for i in 0..=tick_n {
+        let t = gmin + (gmax - gmin) * (i as f64) / (tick_n as f64);
+        let y = map_y(t);
+        f.render_widget(Paragraph::new("┼"), Rect::new(plot_left, y, 1, 1));
+        f.render_widget(
+            Paragraph::new("─".repeat(3)),
+            Rect::new(plot_left + 1, y, 3, 1),
+        );
+        let label = format!("{:>width$}", fmt(t), width = (y_axis_w - 2) as usize);
+        f.render_widget(
+            Paragraph::new(label).style(Style::default().fg(Color::Gray)),
+            Rect::new(inner.x + 1, y, y_axis_w.saturating_sub(2), 1),
+        );
+    }
+    // Y 轴单位
+    f.render_widget(
+        Paragraph::new("耗时 (ns)").style(Style::default().fg(Color::Gray)),
+        Rect::new(
+            inner.x + 1,
+            plot_top.saturating_sub(1),
+            y_axis_w.saturating_sub(2),
+            1,
+        ),
+    );
 
-        // 函数名
-        let name_line = format!(
-            "● {}",
-            if boxplot.label.len() > 30 {
-                format!("{}...", &boxplot.label[..27])
+    // X 轴
+    f.render_widget(
+        Paragraph::new("─".repeat(plot_w as usize)),
+        Rect::new(plot_left, plot_bottom, plot_w, 1),
+    );
+
+    // 为每个函数绘制箱线图
+    let slot_w = (plot_w / items.len() as u16).max(10);
+    for (i, b) in items.iter().enumerate() {
+        let slot_x = plot_left + (i as u16) * slot_w;
+        let cx = slot_x + (slot_w / 2);
+        let box_w = (slot_w.saturating_sub(4)).min(12).max(6);
+        let left = cx.saturating_sub(box_w / 2);
+
+        let min_y = map_y(b.min);
+        let q1_y = map_y(b.q1);
+        let med_y = map_y(b.median);
+        let q3_y = map_y(b.q3);
+        let max_y = map_y(b.max);
+        let (top_y, bottom_y) = (q3_y.min(q1_y), q3_y.max(q1_y));
+
+        // whiskers
+        let top_line = "─".repeat(box_w as usize);
+        f.render_widget(
+            Paragraph::new(top_line.clone()).style(Style::default().fg(Color::Green)),
+            Rect::new(left, max_y, box_w, 1),
+        );
+        f.render_widget(
+            Paragraph::new(top_line).style(Style::default().fg(Color::Green)),
+            Rect::new(left, min_y, box_w, 1),
+        );
+        // stems
+        for yy in (top_y + 1)..max_y {
+            f.render_widget(Paragraph::new("│"), Rect::new(cx, yy, 1, 1));
+        }
+        for yy in (min_y + 1)..bottom_y {
+            f.render_widget(Paragraph::new("│"), Rect::new(cx, yy, 1, 1));
+        }
+        // box
+        for yy in top_y..=bottom_y {
+            let line = if yy == top_y && yy == bottom_y {
+                format!("┌{}┐", "─".repeat((box_w - 2) as usize))
+            } else if yy == top_y {
+                format!("┌{}┐", "─".repeat((box_w - 2) as usize))
+            } else if yy == bottom_y {
+                format!("└{}┘", "─".repeat((box_w - 2) as usize))
             } else {
-                boxplot.label.clone()
-            }
-        );
-        let name_paragraph =
-            Paragraph::new(name_line).style(Style::default().fg(Color::Cyan).bold());
-        f.render_widget(
-            name_paragraph,
-            Rect::new(inner.x + 1, y, inner.width - 2, 1),
-        );
-        y += 1;
-
-        // 统计信息: count, mean
-        let stats_line = format!(
-            "  Count: {}  Mean: {:.2}μs  Median: {:.2}μs",
-            boxplot.count, boxplot.mean, boxplot.median
-        );
-        let stats_paragraph = Paragraph::new(stats_line).style(Style::default().fg(Color::White));
-        f.render_widget(
-            stats_paragraph,
-            Rect::new(inner.x + 1, y, inner.width - 2, 1),
-        );
-        y += 1;
-
-        // 箱线图可视化
-        let range = boxplot.max - boxplot.min;
-        let width = (inner.width - 20) as f64;
-
-        if range > 0.0 {
-            let _min_pos = 0;
-            let q1_pos = ((boxplot.q1 - boxplot.min) / range * width) as u16;
-            let median_pos = ((boxplot.median - boxplot.min) / range * width) as u16;
-            let q3_pos = ((boxplot.q3 - boxplot.min) / range * width) as u16;
-            let max_pos = width as u16;
-
-            // 绘制箱线图
-            let mut chart_line = String::from("  ");
-            chart_line.push_str(&format!("{:.1}", boxplot.min));
-            chart_line.push_str(" ├");
-
-            for i in 0..max_pos {
-                if i == q1_pos || i == q3_pos {
-                    chart_line.push('┤');
-                } else if i == median_pos {
-                    chart_line.push('┼');
-                } else if i > q1_pos && i < q3_pos {
-                    chart_line.push('█');
-                } else {
-                    chart_line.push('─');
-                }
-            }
-
-            chart_line.push('┤');
-            chart_line.push_str(&format!(" {:.1}", boxplot.max));
-
-            let chart_paragraph =
-                Paragraph::new(chart_line).style(Style::default().fg(Color::Green));
+                format!("│{}│", " ".repeat((box_w - 2) as usize))
+            };
             f.render_widget(
-                chart_paragraph,
-                Rect::new(inner.x + 1, y, inner.width - 2, 1),
+                Paragraph::new(line).style(Style::default().fg(Color::Green)),
+                Rect::new(left, yy, box_w, 1),
             );
         }
+        // median
+        let med_len = (box_w - 2).max(1);
+        f.render_widget(
+            Paragraph::new("─".repeat(med_len as usize)).style(Style::default().fg(Color::Yellow)),
+            Rect::new(left + 1, med_y, med_len, 1),
+        );
 
-        y += 2;
+        // X 轴刻度与函数名标签
+        f.render_widget(Paragraph::new("┬"), Rect::new(cx, plot_bottom, 1, 1));
+        let label = if b.label.len() > (slot_w as usize - 2) {
+            let keep = (slot_w as usize - 5).max(3);
+            format!("{}...", &b.label[..keep])
+        } else {
+            b.label.clone()
+        };
+        let lbl = Paragraph::new(label).alignment(Alignment::Center);
+        f.render_widget(lbl, Rect::new(slot_x, plot_bottom + 1, slot_w, 1));
     }
 }
 
@@ -450,7 +527,7 @@ fn draw_data_table(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_help_bar(f: &mut Frame, area: Rect) {
     let help_text =
-        " [q]Quit [↑↓]Navigate [←→]Focus [Tab]Switch [Enter]Select [Mouse]Click/Scroll ";
+        " [q]Quit [↑↓]Navigate [←→]Focus [Tab]Switch [Enter]Select [s]Stats [b]Back [Mouse]Click/Scroll ";
     let help = Paragraph::new(help_text)
         .style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .alignment(Alignment::Center);
@@ -463,4 +540,115 @@ fn draw_help_bar(f: &mut Frame, area: Rect) {
     };
 
     f.render_widget(help, help_area);
+}
+
+fn draw_stats_view(f: &mut Frame, app: &App) {
+    let area = f.area();
+
+    // Vertical split: top chart (box plot), bottom stats table
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .split(area);
+
+    // Top: use runtime data to generate a boxplot chart across CUDA API functions
+    if let Some(ref rt) = app.stats_runtime_data {
+        let viz = crate::visualization::Visualization {
+            _viz_type: crate::visualization::VisualizationType::BoxPlot,
+            data: crate::visualization::ChartData::BoxPlots(
+                crate::visualization::generate_boxplot_data(rt),
+            ),
+            title: "CUDA API 调用耗时箱线图 (ns)".to_string(),
+        };
+
+        match viz.data {
+            crate::visualization::ChartData::BoxPlots(ref boxplots) => {
+                draw_boxplot_chart(
+                    f,
+                    chunks[0],
+                    &viz.title,
+                    boxplots,
+                    app.focus == Focus::Chart,
+                );
+            }
+            _ => {}
+        }
+    } else {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("CUDA API 调用耗时箱线图 (ns)")
+            .border_style(if app.focus == Focus::Chart {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            });
+        let paragraph = Paragraph::new("No runtime data").block(block);
+        f.render_widget(paragraph, chunks[0]);
+    }
+
+    // Bottom: Stats aggregates table
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("CUDA API 聚合统计（单位：ns）")
+        .border_style(if app.focus == Focus::StatsTable {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        });
+
+    let header = Row::new([
+        Cell::from("Function"),
+        Cell::from("Calls"),
+        Cell::from("Total"),
+        Cell::from("Mean"),
+        Cell::from("P50"),
+        Cell::from("P95"),
+        Cell::from("P99"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
+    .height(1);
+
+    let start = app.stats_scroll;
+    let end = (start + 100).min(app.stats_rows.len());
+    let rows: Vec<Row> = app.stats_rows[start..end]
+        .iter()
+        .map(|r| {
+            Row::new([
+                Cell::from(if r.name.len() > 28 {
+                    format!("{}...", &r.name[..25])
+                } else {
+                    r.name.clone()
+                }),
+                Cell::from(r.calls.to_string()),
+                Cell::from(format!("{:.2}", r.total_us * 1000.0)),
+                Cell::from(format!("{:.2}", r.mean_us * 1000.0)),
+                Cell::from(format!("{:.2}", r.p50_us * 1000.0)),
+                Cell::from(format!("{:.2}", r.p95_us * 1000.0)),
+                Cell::from(format!("{:.2}", r.p99_us * 1000.0)),
+            ])
+            .height(1)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Percentage(34),
+        Constraint::Length(8),
+        Constraint::Length(12),
+        Constraint::Length(12),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(10),
+    ];
+
+    let table = Table::new(rows, &widths)
+        .header(header)
+        .block(block)
+        .column_spacing(1);
+    f.render_widget(table, chunks[1]);
+
+    draw_help_bar(f, area);
 }

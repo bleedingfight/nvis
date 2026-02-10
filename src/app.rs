@@ -6,6 +6,7 @@ use tui_input::Input;
 pub enum AppState {
     FileSelection,
     TableView,
+    StatsView,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,6 +15,7 @@ pub enum Focus {
     TableList,
     DataTable,
     Chart,
+    StatsTable,
 }
 
 pub struct App {
@@ -28,6 +30,10 @@ pub struct App {
     pub table_scroll: usize,
     pub chart_scroll: usize,
     pub error_message: Option<String>,
+    // Stats view data
+    pub stats_rows: Vec<crate::stats::CudaApiAggregateRow>,
+    pub stats_scroll: usize,
+    pub stats_runtime_data: Option<TableData>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,7 +56,35 @@ impl App {
             table_scroll: 0,
             chart_scroll: 0,
             error_message: None,
+            stats_rows: Vec::new(),
+            stats_scroll: 0,
+            stats_runtime_data: None,
         }
+    }
+
+    // Initialize the app with a database path directly (bypass file input)
+    pub fn load_database(&mut self, path: &std::path::Path) -> Result<()> {
+        if path.exists() {
+            self.db_path = Some(path.to_path_buf());
+            match crate::db::load_tables(path) {
+                Ok(tables) => {
+                    self.tables = tables;
+                    self.state = AppState::TableView;
+                    self.focus = Focus::TableList;
+                    self.error_message = None;
+                    if !self.tables.is_empty() {
+                        self.selected_table_index = 0;
+                        self.load_table_data()?;
+                    }
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Failed to load database: {}", e));
+                }
+            }
+        } else {
+            self.error_message = Some("File does not exist".to_string());
+        }
+        Ok(())
     }
 
     pub fn is_inputting(&self) -> bool {
@@ -62,6 +96,7 @@ impl App {
             Focus::TableList => {
                 if self.selected_table_index > 0 {
                     self.selected_table_index -= 1;
+                    let _ = self.load_table_data();
                 }
             }
             Focus::DataTable => {
@@ -78,6 +113,7 @@ impl App {
             Focus::TableList => {
                 if self.selected_table_index + 1 < self.tables.len() {
                     self.selected_table_index += 1;
+                    let _ = self.load_table_data();
                 }
             }
             Focus::DataTable => {
@@ -111,6 +147,12 @@ impl App {
                 Focus::DataTable => Focus::TableList,
                 _ => Focus::TableList,
             };
+        } else if self.state == AppState::StatsView {
+            self.focus = match self.focus {
+                Focus::Chart => Focus::StatsTable,
+                Focus::StatsTable => Focus::Chart,
+                _ => Focus::Chart,
+            };
         }
     }
 
@@ -143,11 +185,8 @@ impl App {
                     }
                 }
             }
-            AppState::TableView => {
-                if self.focus == Focus::TableList && !self.tables.is_empty() {
-                    self.load_table_data()?;
-                }
-            }
+            AppState::TableView => {}
+            AppState::StatsView => {}
         }
         Ok(())
     }
@@ -212,6 +251,11 @@ impl App {
             Focus::Chart => {
                 self.chart_scroll = self.chart_scroll.saturating_add(1);
             }
+            Focus::StatsTable => {
+                if self.stats_scroll + 1 < self.stats_rows.len() {
+                    self.stats_scroll += 1;
+                }
+            }
             _ => {}
         }
     }
@@ -226,6 +270,11 @@ impl App {
             }
             Focus::Chart => {
                 self.chart_scroll = self.chart_scroll.saturating_sub(1);
+            }
+            Focus::StatsTable => {
+                if self.stats_scroll > 0 {
+                    self.stats_scroll -= 1;
+                }
             }
             _ => {}
         }
@@ -253,7 +302,8 @@ impl App {
         if let Some(ref db_path) = self.db_path {
             if let Some(table_name) = self.tables.get(self.selected_table_index) {
                 self.selected_table = Some(table_name.clone());
-                match crate::db::load_table_data(db_path, table_name) {
+                // Prefer resolved names when possible for better CUDA API labeling
+                match crate::db::load_table_data_resolved(db_path, table_name) {
                     Ok(data) => {
                         self.table_data = Some(data);
                         self.table_scroll = 0;
@@ -266,5 +316,42 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    pub fn enter_stats_view(&mut self) -> Result<()> {
+        if let Some(ref db_path) = self.db_path {
+            match crate::stats::compute_cuda_api_aggregates(db_path, 50) {
+                Ok(rows) => {
+                    self.stats_rows = rows;
+                    self.stats_scroll = 0;
+                    match crate::db::load_table_data_resolved(
+                        db_path,
+                        "CUPTI_ACTIVITY_KIND_RUNTIME",
+                    ) {
+                        Ok(rt) => {
+                            self.stats_runtime_data = Some(rt);
+                        }
+                        Err(e) => {
+                            self.error_message = Some(format!("Failed to load runtime: {}", e));
+                            self.stats_runtime_data = None;
+                        }
+                    }
+                    self.state = AppState::StatsView;
+                    self.focus = Focus::Chart;
+                    self.error_message = None;
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Failed to compute stats: {}", e));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn leave_stats_view(&mut self) {
+        if self.state == AppState::StatsView {
+            self.state = AppState::TableView;
+            self.focus = Focus::TableList;
+        }
     }
 }

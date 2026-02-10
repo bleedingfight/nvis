@@ -1,8 +1,3 @@
-mod app;
-mod db;
-mod ui;
-mod visualization;
-
 use anyhow::Result;
 use crossterm::{
     event::{
@@ -14,7 +9,9 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 
-use app::App;
+use nvis::app::App;
+use nvis::ui;
+use std::env;
 
 fn main() -> Result<()> {
     enable_raw_mode()?;
@@ -24,6 +21,12 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
+    // If a path is passed as CLI arg, load it directly; else fallback to TUI input
+    if let Some(path) = env::args().nth(1) {
+        let p = std::path::Path::new(&path);
+        // Attempt to load; stay in app even if it fails so error shows in UI
+        let _ = app.load_database(p);
+    }
     let res = run_app(&mut terminal, &mut app);
 
     disable_raw_mode()?;
@@ -54,6 +57,14 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                         } else {
                             app.on_char('q');
                         }
+                    }
+                    KeyCode::Char('s') => {
+                        // Enter stats page
+                        let _ = app.enter_stats_view();
+                    }
+                    KeyCode::Char('b') => {
+                        // Back from stats page
+                        app.leave_stats_view();
                     }
                     KeyCode::Esc => {
                         if !app.is_inputting() {
