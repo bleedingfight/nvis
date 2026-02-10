@@ -1,0 +1,11 @@
+[package]
+name = "nvis"
+version = "0.2.2"
+edition = "2021"
+
+[dependencies]
+ratatui = "0.28"
+crossterm = "0.28"
+rusqlite = { version = "0.32", features = ["bundled"] }
+anyhow = "1.0"
+tui-input = "0.10"
