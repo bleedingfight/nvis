@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-02-10
+
+### Fixed
+- **BoxPlot visualization now works** - Fixed critical issue where BoxPlot showed no data
+  - Enhanced `generate_boxplot_data()` to calculate duration from start/end columns
+  - Previously only worked with explicit "duration" columns
+  - Now supports NSYS tables that use separate "start" and "end" columns
+  - Added automatic duration calculation: `duration = end - start`
+  - Added negative duration filtering
+  
+- **Kernel table visualization** - Fixed detection priority issue
+  - Reordered `detect_table_type()` to check kernel/event/memcpy BEFORE generic cuda
+  - `CUPTI_ACTIVITY_KIND_KERNEL` now correctly shows Timeline instead of BoxPlot
+  - Prevents kernel execution tables from being misclassified
+  
+- **StringIds table confirmed working** - Investigation showed no crash occurs
+  - Properly handles 1000+ row tables
+  - Displays as BarChart visualization
+  - No panics or errors
+
+### Added
+- **Library interface** - Created `src/lib.rs` for external testing
+  - Exports app, db, visualization, and ui modules
+  - Enables example programs and unit tests
+  
+- **Comprehensive test suite** - Added `examples/test_viz.rs`
+  - Tests all 4 visualization types
+  - Validates detection logic
+  - Demonstrates proper functionality
+  - Run with: `cargo run --example test_viz`
+
+### Improved
+- Better column detection logic for BoxPlot generation
+- More robust handling of tables without duration columns
+- Enhanced Timeline detection to include memcpy tables
+- Added INVESTIGATION_REPORT.md documenting all findings
+
+### Verified
+- ✓ BarChart: StringIds table (1000 rows)
+- ✓ BoxPlot: CUPTI_ACTIVITY_KIND_RUNTIME (88 rows, 10 plots)
+- ✓ Timeline: CUPTI_ACTIVITY_KIND_KERNEL (10 rows, 10 events)
+- ✓ Statistics: TARGET_INFO_SYSTEM_ENV (86 rows)
+
 ## [0.2.2] - 2026-02-10
 
 ### Fixed

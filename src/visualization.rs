@@ -47,6 +47,18 @@ pub fn detect_table_type(table_name: &str, data: &TableData) -> VisualizationTyp
     let table_lower = table_name.to_lowercase();
     let columns_lower: Vec<String> = data.columns.iter().map(|c| c.to_lowercase()).collect();
 
+    // 先检查是否是事件/内核表 (优先级高于通用CUDA检查)
+    if (table_lower.contains("kernel")
+        || table_lower.contains("event")
+        || table_lower.contains("memcpy"))
+        && columns_lower.iter().any(|c| c.contains("start"))
+        && columns_lower
+            .iter()
+            .any(|c| c.contains("end") || c.contains("duration"))
+    {
+        return VisualizationType::Timeline;
+    }
+
     // 检查是否是CUDA API调用表
     if table_lower.contains("cuda")
         || table_lower.contains("runtime")
@@ -64,16 +76,6 @@ pub fn detect_table_type(table_name: &str, data: &TableData) -> VisualizationTyp
         }
     }
 
-    // 检查是否是事件/内核表
-    if (table_lower.contains("kernel") || table_lower.contains("event"))
-        && columns_lower.iter().any(|c| c.contains("start"))
-        && columns_lower
-            .iter()
-            .any(|c| c.contains("end") || c.contains("duration"))
-    {
-        return VisualizationType::Timeline;
-    }
-
     // 检查是否是统计信息表
     if table_lower.contains("stat")
         || table_lower.contains("summary")
@@ -88,34 +90,71 @@ pub fn detect_table_type(table_name: &str, data: &TableData) -> VisualizationTyp
 
 /// 为CUDA API调用生成箱线图数据
 pub fn generate_boxplot_data(data: &TableData) -> Vec<BoxPlotData> {
-    // 找到name/function和duration列
+    // 找到name/function列
     let name_col = data.columns.iter().position(|c| {
         let cl = c.to_lowercase();
         cl.contains("name") || cl.contains("function") || cl.contains("api")
     });
 
+    if name_col.is_none() {
+        return Vec::new();
+    }
+
+    let name_idx = name_col.unwrap();
+
+    // 找到duration列，或者start/end列来计算duration
     let duration_col = data.columns.iter().position(|c| {
         let cl = c.to_lowercase();
         cl.contains("duration") || cl.contains("time") || cl.contains("elapsed")
     });
 
-    if name_col.is_none() || duration_col.is_none() {
+    let start_col = data
+        .columns
+        .iter()
+        .position(|c| c.to_lowercase().contains("start"));
+
+    let end_col = data
+        .columns
+        .iter()
+        .position(|c| c.to_lowercase().contains("end"));
+
+    // 如果既没有duration列，也没有start/end列对，则返回空
+    if duration_col.is_none() && (start_col.is_none() || end_col.is_none()) {
         return Vec::new();
     }
-
-    let name_idx = name_col.unwrap();
-    let dur_idx = duration_col.unwrap();
 
     // 按函数名分组收集duration数据
     let mut groups: HashMap<String, Vec<f64>> = HashMap::new();
 
     for row in &data.rows {
-        if let (Some(name), Some(duration_str)) = (row.get(name_idx), row.get(dur_idx)) {
-            if let Ok(duration) = duration_str.parse::<f64>() {
-                groups
-                    .entry(name.clone())
-                    .or_insert_with(Vec::new)
-                    .push(duration);
+        if let Some(name) = row.get(name_idx) {
+            let duration = if let Some(dur_idx) = duration_col {
+                // 直接从duration列获取
+                row.get(dur_idx).and_then(|v| v.parse::<f64>().ok())
+            } else if let (Some(start_idx), Some(end_idx)) = (start_col, end_col) {
+                // 从start和end计算duration
+                if let (Some(start_str), Some(end_str)) = (row.get(start_idx), row.get(end_idx)) {
+                    if let (Ok(start), Ok(end)) = (start_str.parse::<f64>(), end_str.parse::<f64>())
+                    {
+                        Some(end - start)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(dur_value) = duration {
+                if dur_value >= 0.0 {
+                    // 过滤负数duration
+                    groups
+                        .entry(name.clone())
+                        .or_insert_with(Vec::new)
+                        .push(dur_value);
+                }
             }
         }
     }
