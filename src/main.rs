@@ -69,17 +69,18 @@ fn restore_terminal<B: ratatui::backend::Backend + std::io::Write>(
     Ok(())
 }
 
-fn run_app<B: ratatui::backend::Backend>(
+fn run_app<B: ratatui::backend::Backend + std::io::Write>(
     terminal: &mut Terminal<B>,
     app: &mut App,
 ) -> Result<()> {
-    let mut cached_chart_area = ratatui::layout::Rect::default();
+    let mut mouse_captured = true;
 
     loop {
         terminal.draw(|f| {
             ui::draw(f, app);
-            cached_chart_area = ui::compute_chart_area(f.area());
         })?;
+        let size = terminal.size()?;
+        let full_area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
 
         let event = event::read()?;
         match event {
@@ -92,6 +93,15 @@ fn run_app<B: ratatui::backend::Backend>(
                     // Ctrl+C always exits
                     (KeyCode::Char('c'), true, _) => {
                         return Ok(());
+                    }
+                    // Ctrl+M: toggle mouse capture for terminal text selection/copy
+                    (KeyCode::Char('m'), true, false) => {
+                        mouse_captured = !mouse_captured;
+                        if mouse_captured {
+                            execute!(terminal.backend_mut(), EnableMouseCapture)?;
+                        } else {
+                            execute!(terminal.backend_mut(), DisableMouseCapture)?;
+                        }
                     }
                     // Ctrl+A: go to start of input (shell convention)
                     (KeyCode::Char('a'), true, false) => {
@@ -123,37 +133,37 @@ fn run_app<B: ratatui::backend::Backend>(
                     }
                     // q: quit when not inputting, otherwise insert
                     (KeyCode::Char('q'), false, false) => {
-                        if !app.is_inputting() {
+                        if !app.is_inputting() && !app.is_sql_inputting() {
                             return Ok(());
                         } else {
                             app.on_char('q');
                         }
                     }
                     // s/b: only act when not inputting
-                    (KeyCode::Char('s'), false, false) if !app.is_inputting() => {
+                    (KeyCode::Char('s'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
                         let _ = app.enter_stats_view();
                     }
-                    (KeyCode::Char('b'), false, false) if !app.is_inputting() => {
+                    (KeyCode::Char('b'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
                         app.leave_stats_view();
                     }
                     // Timeline zoom/pan when chart is focused and not inputting
                     (KeyCode::Char('+'), false, false) | (KeyCode::Char('='), false, false)
-                        if !app.is_inputting() =>
+                        if !app.is_inputting() && !app.is_sql_inputting() =>
                     {
                         app.on_timeline_zoom_in();
                     }
                     (KeyCode::Char('-'), false, false) | (KeyCode::Char('_'), false, false)
-                        if !app.is_inputting() =>
+                        if !app.is_inputting() && !app.is_sql_inputting() =>
                     {
                         app.on_timeline_zoom_out();
                     }
-                    (KeyCode::Char('h'), false, false) if !app.is_inputting() => {
+                    (KeyCode::Char('h'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
                         app.on_timeline_pan_left();
                     }
-                    (KeyCode::Char('l'), false, false) if !app.is_inputting() => {
+                    (KeyCode::Char('l'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
                         app.on_timeline_pan_right();
                     }
-                    (KeyCode::Char('r'), false, false) if !app.is_inputting() => {
+                    (KeyCode::Char('r'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
                         app.on_timeline_reset_view();
                     }
                     // Esc always exits
@@ -164,14 +174,14 @@ fn run_app<B: ratatui::backend::Backend>(
                     (KeyCode::Up, _, _) => app.on_up(),
                     (KeyCode::Down, _, _) => app.on_down(),
                     (KeyCode::Left, false, false) => {
-                        if app.is_inputting() {
+                        if app.is_inputting() || app.is_sql_inputting() {
                             app.on_input_left();
                         } else if !shift {
                             app.on_left();
                         }
                     }
                     (KeyCode::Right, false, false) => {
-                        if app.is_inputting() {
+                        if app.is_inputting() || app.is_sql_inputting() {
                             app.on_input_right();
                         } else if !shift {
                             app.on_right();
@@ -188,36 +198,36 @@ fn run_app<B: ratatui::backend::Backend>(
                     _ => {}
                 }
             }
-            Event::Mouse(mouse) => match mouse.kind {
+            Event::Mouse(mouse) if mouse_captured => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    app.on_mouse_down(MouseButton::Left, mouse.column, mouse.row, cached_chart_area);
+                    app.on_mouse_down(MouseButton::Left, mouse.column, mouse.row, full_area);
                 }
                 MouseEventKind::Down(MouseButton::Right) => {
-                    app.on_mouse_down(MouseButton::Right, mouse.column, mouse.row, cached_chart_area);
+                    app.on_mouse_down(MouseButton::Right, mouse.column, mouse.row, full_area);
                 }
                 MouseEventKind::Down(MouseButton::Middle) => {
-                    app.on_mouse_down(MouseButton::Middle, mouse.column, mouse.row, cached_chart_area);
+                    app.on_mouse_down(MouseButton::Middle, mouse.column, mouse.row, full_area);
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
-                    app.on_mouse_up(MouseButton::Left);
+                    app.on_mouse_up(MouseButton::Left, mouse.column, mouse.row, full_area);
                 }
                 MouseEventKind::Up(MouseButton::Right) => {
-                    app.on_mouse_up(MouseButton::Right);
+                    app.on_mouse_up(MouseButton::Right, mouse.column, mouse.row, full_area);
                 }
                 MouseEventKind::Up(MouseButton::Middle) => {
-                    app.on_mouse_up(MouseButton::Middle);
+                    app.on_mouse_up(MouseButton::Middle, mouse.column, mouse.row, full_area);
                 }
                 MouseEventKind::Drag(MouseButton::Left) => {
-                    app.on_mouse_drag(MouseButton::Left, mouse.column, mouse.row, cached_chart_area);
+                    app.on_mouse_drag(MouseButton::Left, mouse.column, mouse.row, full_area);
                 }
                 MouseEventKind::Drag(MouseButton::Right) => {
-                    app.on_mouse_drag(MouseButton::Right, mouse.column, mouse.row, cached_chart_area);
+                    app.on_mouse_drag(MouseButton::Right, mouse.column, mouse.row, full_area);
                 }
                 MouseEventKind::Drag(MouseButton::Middle) => {
-                    app.on_mouse_drag(MouseButton::Middle, mouse.column, mouse.row, cached_chart_area);
+                    app.on_mouse_drag(MouseButton::Middle, mouse.column, mouse.row, full_area);
                 }
                 MouseEventKind::Moved => {
-                    app.on_mouse_move(mouse.column, mouse.row, cached_chart_area);
+                    app.on_mouse_move(mouse.column, mouse.row, full_area);
                 }
                 MouseEventKind::ScrollDown => {
                     if mouse.modifiers.contains(KeyModifiers::SHIFT) {

@@ -6,7 +6,7 @@ use tui_input::Input;
 use crate::core::backend::ProfilerBackend;
 use crate::core::registry::Registry;
 use crate::core::session::ProfilerSession;
-use crate::core::types::{ProfilerData, ViewDescriptor};
+use crate::core::types::{ProfilerData, ViewCategory, ViewDescriptor};
 use crate::viz::renderer::VizRenderer;
 use crate::viz::types::{PreparedVisualization, TimelineViewport, VizData};
 use crate::viz::timeline;
@@ -25,6 +25,8 @@ pub enum Focus {
     DataTable,
     Chart,
     StatsTable,
+    SqlInput,
+    SqlResult,
 }
 
 pub struct App {
@@ -57,6 +59,21 @@ pub struct App {
 
     // Timeline interactive state
     pub timeline_viewport: Option<TimelineViewport>,
+
+    // SQL console state
+    pub sql_input: Input,
+    pub sql_result: Option<ProfilerData>,
+    pub sql_scroll: usize,
+    pub sql_error: Option<String>,
+}
+
+fn prepared_stream_count(viz: &Option<PreparedVisualization>) -> usize {
+    viz.as_ref()
+        .and_then(|v| match &v.data {
+            VizData::Timeline(p) => Some(p.stream_ids.len()),
+            _ => None,
+        })
+        .unwrap_or(0)
 }
 
 impl App {
@@ -79,6 +96,10 @@ impl App {
             prepared_viz: None,
             active_renderer: None,
             timeline_viewport: None,
+            sql_input: Input::default(),
+            sql_result: None,
+            sql_scroll: 0,
+            sql_error: None,
         }
     }
 
@@ -130,6 +151,36 @@ impl App {
         self.state == AppState::FileSelection && self.focus == Focus::FileInput
     }
 
+    pub fn is_sql_inputting(&self) -> bool {
+        self.state == AppState::ViewBrowser && self.focus == Focus::SqlInput
+    }
+
+    fn current_view_is_timeline(&self) -> bool {
+        self.views
+            .get(self.selected_view_index)
+            .map_or(false, |v| v.category == ViewCategory::Timeline)
+    }
+
+    pub fn execute_current_sql(&mut self) {
+        let sql = self.sql_input.value().to_string();
+        if sql.trim().is_empty() {
+            return;
+        }
+        if let (Some(ref backend), Some(ref session)) = (&self.backend, &self.session) {
+            match backend.execute_sql(session.as_ref(), &sql) {
+                Ok(data) => {
+                    self.sql_result = Some(data);
+                    self.sql_error = None;
+                    self.sql_scroll = 0;
+                }
+                Err(e) => {
+                    self.sql_error = Some(format!("{}", e));
+                    self.sql_result = None;
+                }
+            }
+        }
+    }
+
     pub fn on_up(&mut self) {
         match self.focus {
             Focus::ViewList => {
@@ -179,12 +230,22 @@ impl App {
 
     pub fn on_tab(&mut self) {
         if self.state == AppState::ViewBrowser {
-            self.focus = match self.focus {
-                Focus::ViewList => Focus::Chart,
-                Focus::Chart => Focus::DataTable,
-                Focus::DataTable => Focus::ViewList,
-                _ => Focus::ViewList,
-            };
+            if self.current_view_is_timeline() {
+                self.focus = match self.focus {
+                    Focus::ViewList => Focus::Chart,
+                    Focus::Chart => Focus::SqlInput,
+                    Focus::SqlInput => Focus::SqlResult,
+                    Focus::SqlResult => Focus::ViewList,
+                    _ => Focus::ViewList,
+                };
+            } else {
+                self.focus = match self.focus {
+                    Focus::ViewList => Focus::Chart,
+                    Focus::Chart => Focus::DataTable,
+                    Focus::DataTable => Focus::ViewList,
+                    _ => Focus::ViewList,
+                };
+            }
         } else if self.state == AppState::StatsView {
             self.focus = match self.focus {
                 Focus::Chart => Focus::StatsTable,
@@ -200,41 +261,58 @@ impl App {
             if !path_str.is_empty() {
                 self.load_database(&PathBuf::from(path_str))?;
             }
+        } else if self.is_sql_inputting() {
+            self.execute_current_sql();
         }
         Ok(())
     }
 
     pub fn on_char(&mut self, c: char) {
-        if self.state == AppState::FileSelection && self.focus == Focus::FileInput {
+        if self.is_inputting() {
             self.file_input
+                .handle(tui_input::InputRequest::InsertChar(c));
+        } else if self.is_sql_inputting() {
+            self.sql_input
                 .handle(tui_input::InputRequest::InsertChar(c));
         }
     }
 
     pub fn on_backspace(&mut self) {
-        if self.state == AppState::FileSelection && self.focus == Focus::FileInput {
+        if self.is_inputting() {
             self.file_input
+                .handle(tui_input::InputRequest::DeletePrevChar);
+        } else if self.is_sql_inputting() {
+            self.sql_input
                 .handle(tui_input::InputRequest::DeletePrevChar);
         }
     }
 
     pub fn on_delete(&mut self) {
-        if self.state == AppState::FileSelection && self.focus == Focus::FileInput {
+        if self.is_inputting() {
             self.file_input
+                .handle(tui_input::InputRequest::DeleteNextChar);
+        } else if self.is_sql_inputting() {
+            self.sql_input
                 .handle(tui_input::InputRequest::DeleteNextChar);
         }
     }
 
     pub fn on_input_left(&mut self) {
-        if self.state == AppState::FileSelection && self.focus == Focus::FileInput {
+        if self.is_inputting() {
             self.file_input
+                .handle(tui_input::InputRequest::GoToPrevChar);
+        } else if self.is_sql_inputting() {
+            self.sql_input
                 .handle(tui_input::InputRequest::GoToPrevChar);
         }
     }
 
     pub fn on_input_right(&mut self) {
-        if self.state == AppState::FileSelection && self.focus == Focus::FileInput {
+        if self.is_inputting() {
             self.file_input
+                .handle(tui_input::InputRequest::GoToNextChar);
+        } else if self.is_sql_inputting() {
+            self.sql_input
                 .handle(tui_input::InputRequest::GoToNextChar);
         }
     }
@@ -242,42 +320,56 @@ impl App {
     pub fn on_input_ctrl_a(&mut self) {
         if self.is_inputting() {
             self.file_input.handle(tui_input::InputRequest::GoToStart);
+        } else if self.is_sql_inputting() {
+            self.sql_input.handle(tui_input::InputRequest::GoToStart);
         }
     }
 
     pub fn on_input_ctrl_e(&mut self) {
         if self.is_inputting() {
             self.file_input.handle(tui_input::InputRequest::GoToEnd);
+        } else if self.is_sql_inputting() {
+            self.sql_input.handle(tui_input::InputRequest::GoToEnd);
         }
     }
 
     pub fn on_input_ctrl_u(&mut self) {
         if self.is_inputting() {
             self.file_input.handle(tui_input::InputRequest::DeleteLine);
+        } else if self.is_sql_inputting() {
+            self.sql_input.handle(tui_input::InputRequest::DeleteLine);
         }
     }
 
     pub fn on_input_ctrl_k(&mut self) {
         if self.is_inputting() {
             self.file_input.handle(tui_input::InputRequest::DeleteTillEnd);
+        } else if self.is_sql_inputting() {
+            self.sql_input.handle(tui_input::InputRequest::DeleteTillEnd);
         }
     }
 
     pub fn on_input_ctrl_w(&mut self) {
         if self.is_inputting() {
             self.file_input.handle(tui_input::InputRequest::DeletePrevWord);
+        } else if self.is_sql_inputting() {
+            self.sql_input.handle(tui_input::InputRequest::DeletePrevWord);
         }
     }
 
     pub fn on_input_alt_b(&mut self) {
         if self.is_inputting() {
             self.file_input.handle(tui_input::InputRequest::GoToPrevWord);
+        } else if self.is_sql_inputting() {
+            self.sql_input.handle(tui_input::InputRequest::GoToPrevWord);
         }
     }
 
     pub fn on_input_alt_f(&mut self) {
         if self.is_inputting() {
             self.file_input.handle(tui_input::InputRequest::GoToNextWord);
+        } else if self.is_sql_inputting() {
+            self.sql_input.handle(tui_input::InputRequest::GoToNextWord);
         }
     }
 
@@ -314,6 +406,13 @@ impl App {
                     }
                 }
             }
+            Focus::SqlResult => {
+                if let Some(ref data) = self.sql_result {
+                    if self.sql_scroll + 1 < data.row_count {
+                        self.sql_scroll += 1;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -333,6 +432,10 @@ impl App {
             Focus::StatsTable
                 if self.stats_scroll > 0 => {
                     self.stats_scroll -= 1;
+                }
+            Focus::SqlResult
+                if self.sql_scroll > 0 => {
+                    self.sql_scroll -= 1;
                 }
             _ => {}
         }
@@ -481,42 +584,128 @@ impl App {
         button: crossterm::event::MouseButton,
         col: u16,
         row: u16,
-        _chart_area: ratatui::layout::Rect,
+        full_area: ratatui::layout::Rect,
     ) {
-        if self.focus != Focus::Chart {
+        let is_timeline = self.current_view_is_timeline();
+        let (left, _, right_chunks) = crate::ui::layout_chunks(full_area, is_timeline);
+        let chart_area = right_chunks[0];
+
+        // Determine which region was clicked and set focus
+        if col < left.x + left.width {
+            self.focus = Focus::ViewList;
             return;
         }
-        let Some(ref mut viewport) = self.timeline_viewport else {
-            return;
-        };
 
-        match button {
-            crossterm::event::MouseButton::Left => {
-                viewport.drag_origin = Some((col, row));
-                viewport.selection = None;
-            }
-            crossterm::event::MouseButton::Right | crossterm::event::MouseButton::Middle => {
-                viewport.panning = true;
-                viewport.pan_anchor_ns = viewport.view_start_ns;
-                viewport.pan_anchor_col = col;
+        if row < chart_area.y + chart_area.height {
+            self.focus = Focus::Chart;
+        } else if is_timeline && right_chunks.len() > 2 && row < right_chunks[1].y + right_chunks[1].height {
+            self.focus = Focus::SqlInput;
+        } else if is_timeline && right_chunks.len() > 2 && row < right_chunks[2].y + right_chunks[2].height {
+            self.focus = Focus::SqlResult;
+        } else if !is_timeline && right_chunks.len() > 1 && row < right_chunks[1].y + right_chunks[1].height {
+            self.focus = Focus::DataTable;
+        } else {
+            self.focus = Focus::ViewList;
+        }
+
+        // Only start timeline drag if focus is Chart and click is within the plot area
+        if self.focus == Focus::Chart {
+            let Some(ref mut viewport) = self.timeline_viewport else {
+                return;
+            };
+            let inner = chart_area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 1 });
+            let pa = timeline::plot_area(inner);
+            let stream_count = prepared_stream_count(&self.prepared_viz);
+            let in_plot = col >= pa.x && col < pa.x + pa.width
+                && row >= pa.y && row < pa.y + (stream_count as u16) * timeline::LANE_HEIGHT_ROWS;
+
+            if in_plot {
+                match button {
+                    crossterm::event::MouseButton::Left => {
+                        viewport.drag_origin = Some((col, row));
+                        viewport.selection = None;
+                    }
+                    crossterm::event::MouseButton::Right | crossterm::event::MouseButton::Middle => {
+                        viewport.panning = true;
+                        viewport.pan_anchor_ns = viewport.view_start_ns;
+                        viewport.pan_anchor_col = col;
+                    }
+                }
             }
         }
     }
 
-    pub fn on_mouse_up(&mut self, button: crossterm::event::MouseButton) {
+    pub fn on_mouse_up(
+        &mut self,
+        button: crossterm::event::MouseButton,
+        col: u16,
+        row: u16,
+        full_area: ratatui::layout::Rect,
+    ) {
         if self.focus != Focus::Chart {
             return;
         }
-        let Some(ref mut viewport) = self.timeline_viewport else {
-            return;
-        };
 
         match button {
             crossterm::event::MouseButton::Left => {
-                viewport.drag_origin = None;
+                let click_result = self.timeline_viewport.as_ref().and_then(|vp| {
+                    if let Some((origin_col, _)) = vp.drag_origin {
+                        let dx = (col as i16 - origin_col as i16).unsigned_abs();
+                        if dx <= 2 && vp.selection.is_none() {
+                            return self.prepared_viz.as_ref().and_then(|viz| {
+                                if let VizData::Timeline(ref prepared) = viz.data {
+                                    let is_tl = self.current_view_is_timeline();
+                                    let (_, _, right_chunks) = crate::ui::layout_chunks(full_area, is_tl);
+                                    let chart_area = right_chunks[0];
+                                    let inner = chart_area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 1 });
+                                    let pa = timeline::plot_area(inner);
+                                    if col < pa.x || col >= pa.x + pa.width || row < pa.y { return None; }
+                                    let mouse_int = (col.saturating_sub(pa.x)) as usize;
+                                    let lane = timeline::row_to_lane(row, pa.y, prepared.stream_ids.len())?;
+                                    let target_stream = prepared.stream_ids[lane];
+                                    let mut best: Option<(usize, f64, f64, usize)> = None; // (idx, start, end, distance)
+                                    for (i, e) in prepared.events.iter().enumerate() {
+                                        if e.stream_id != target_stream { continue; }
+                                        let sc_f = timeline::ns_to_col(e.start, vp.view_start_ns, vp.view_width_ns, pa.width);
+                                        let ec_f = timeline::ns_to_col(e.start + e.duration, vp.view_start_ns, vp.view_width_ns, pa.width);
+                                        let sc = sc_f.max(0.0) as usize;
+                                        let w = ((ec_f - sc_f).ceil() as usize).max(1);
+                                        let dist = if mouse_int >= sc && mouse_int < sc + w {
+                                            0
+                                        } else if mouse_int >= sc.saturating_sub(1) && mouse_int < sc + w + 1 {
+                                            1
+                                        } else {
+                                            continue;
+                                        };
+                                        if best.is_none() || dist < best.as_ref().unwrap().3 {
+                                            best = Some((i, e.start, e.start + e.duration, dist));
+                                        }
+                                    }
+                                    best.map(|(i, s, e, _)| (i, s, e))
+                                } else {
+                                    None
+                                }
+                            });
+                        }
+                    }
+                    None
+                });
+
+                if let Some((idx, start_ns, end_ns)) = click_result {
+                    if let Some(ref mut viewport) = self.timeline_viewport {
+                        viewport.selection = Some((start_ns, end_ns));
+                        viewport.hovered = Some(idx);
+                        self.update_timeline_viewport();
+                    }
+                }
+                if let Some(ref mut viewport) = self.timeline_viewport {
+                    viewport.drag_origin = None;
+                }
             }
             crossterm::event::MouseButton::Right | crossterm::event::MouseButton::Middle => {
-                viewport.panning = false;
+                if let Some(ref mut viewport) = self.timeline_viewport {
+                    viewport.panning = false;
+                }
             }
         }
     }
@@ -525,23 +714,25 @@ impl App {
         &mut self,
         button: crossterm::event::MouseButton,
         col: u16,
-        _row: u16,
-        chart_area: ratatui::layout::Rect,
+        row: u16,
+        full_area: ratatui::layout::Rect,
     ) {
         if self.focus != Focus::Chart {
             return;
         }
+
+        let is_tl = self.current_view_is_timeline();
+        let (_, _, right_chunks) = crate::ui::layout_chunks(full_area, is_tl);
+        let chart_area = right_chunks[0];
+        let inner = chart_area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 1 });
+        let pa = timeline::plot_area(inner);
+
         let Some(ref mut viewport) = self.timeline_viewport else {
             return;
         };
 
         if button == crossterm::event::MouseButton::Left {
-            if let Some((origin_col, _origin_row)) = viewport.drag_origin {
-                let inner = chart_area.inner(ratatui::layout::Margin {
-                    vertical: 1,
-                    horizontal: 1,
-                });
-                let pa = timeline::plot_area(inner);
+            if let Some((origin_col, _)) = viewport.drag_origin {
                 let start_ns = timeline::col_to_ns(
                     origin_col.saturating_sub(pa.x) as f64,
                     viewport.view_start_ns,
@@ -555,14 +746,52 @@ impl App {
                     pa.width,
                 );
                 viewport.selection = Some((start_ns.min(end_ns), start_ns.max(end_ns)));
+
+                // Update hovered event during drag (with ±1 col tolerance)
+                if let Some(ref viz) = self.prepared_viz {
+                    if let VizData::Timeline(ref prepared) = viz.data {
+                        let stream_count = prepared.stream_ids.len() as u16;
+                        if col >= pa.x && col < pa.x + pa.width
+                            && row >= pa.y && row < pa.y + stream_count * timeline::LANE_HEIGHT_ROWS
+                        {
+                            let mouse_int = (col - pa.x) as usize;
+                            let lane = timeline::row_to_lane(row, pa.y, prepared.stream_ids.len());
+                            if let Some(lane_idx) = lane {
+                                let target_stream = prepared.stream_ids[lane_idx];
+                                let mut best: Option<(usize, usize)> = None;
+                                for (i, e) in prepared.events.iter().enumerate() {
+                                    if e.stream_id != target_stream { continue; }
+                                    let start_col_f = timeline::ns_to_col(
+                                        e.start, viewport.view_start_ns, viewport.view_width_ns, pa.width,
+                                    );
+                                    let end_col_f = timeline::ns_to_col(
+                                        e.start + e.duration, viewport.view_start_ns, viewport.view_width_ns, pa.width,
+                                    );
+                                    let start_col = start_col_f.max(0.0) as usize;
+                                    let width = ((end_col_f - start_col_f).ceil() as usize).max(1);
+                                    let dist = if mouse_int >= start_col && mouse_int < start_col + width {
+                                        0
+                                    } else if mouse_int >= start_col.saturating_sub(1) && mouse_int < start_col + width + 1 {
+                                        1
+                                    } else {
+                                        continue;
+                                    };
+                                    if best.is_none() || dist < best.unwrap().1 {
+                                        best = Some((i, dist));
+                                    }
+                                }
+                                viewport.hovered = best.map(|(i, _)| i);
+                            } else {
+                                viewport.hovered = None;
+                            }
+                        } else {
+                            viewport.hovered = None;
+                        }
+                    }
+                }
                 self.update_timeline_viewport();
             }
         } else if viewport.panning {
-            let inner = chart_area.inner(ratatui::layout::Margin {
-                vertical: 1,
-                horizontal: 1,
-            });
-            let pa = timeline::plot_area(inner);
             let dx_cols = col as i16 - viewport.pan_anchor_col as i16;
             let ns_per_col = viewport.view_width_ns / pa.width as f64;
             viewport.view_start_ns = viewport.pan_anchor_ns - dx_cols as f64 * ns_per_col;
@@ -570,7 +799,7 @@ impl App {
         }
     }
 
-    pub fn on_mouse_move(&mut self, col: u16, row: u16, chart_area: ratatui::layout::Rect) {
+    pub fn on_mouse_move(&mut self, col: u16, row: u16, full_area: ratatui::layout::Rect) {
         if self.focus != Focus::Chart {
             return;
         }
@@ -580,34 +809,49 @@ impl App {
         let VizData::Timeline(ref prepared) = viz.data else {
             return;
         };
+
+        let is_tl = self.current_view_is_timeline();
+        let (_, _, right_chunks) = crate::ui::layout_chunks(full_area, is_tl);
+        let chart_area = right_chunks[0];
+        let inner = chart_area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 1 });
+        let pa = timeline::plot_area(inner);
+
         let Some(ref mut viewport) = self.timeline_viewport else {
             return;
         };
-
-        let inner = chart_area.inner(ratatui::layout::Margin {
-            vertical: 1,
-            horizontal: 1,
-        });
-        let pa = timeline::plot_area(inner);
 
         if col >= pa.x
             && col < pa.x + pa.width
             && row >= pa.y
             && row < pa.y + (prepared.stream_ids.len() as u16) * timeline::LANE_HEIGHT_ROWS
         {
-            let ns = timeline::col_to_ns(
-                (col - pa.x) as f64,
-                viewport.view_start_ns,
-                viewport.view_width_ns,
-                pa.width,
-            );
+            let mouse_int = (col - pa.x) as usize;
             let lane = timeline::row_to_lane(row, pa.y, prepared.stream_ids.len());
             if let Some(lane_idx) = lane {
                 let target_stream = prepared.stream_ids[lane_idx];
-                viewport.hovered = prepared.events.iter().enumerate()
-                    .filter(|(_, e)| e.stream_id == target_stream)
-                    .find(|(_, e)| e.start <= ns && e.start + e.duration >= ns)
-                    .map(|(i, _)| i);
+                let mut best: Option<(usize, usize)> = None;
+                for (i, e) in prepared.events.iter().enumerate() {
+                    if e.stream_id != target_stream { continue; }
+                    let start_col_f = timeline::ns_to_col(
+                        e.start, viewport.view_start_ns, viewport.view_width_ns, pa.width,
+                    );
+                    let end_col_f = timeline::ns_to_col(
+                        e.start + e.duration, viewport.view_start_ns, viewport.view_width_ns, pa.width,
+                    );
+                    let start_col = start_col_f.max(0.0) as usize;
+                    let width = ((end_col_f - start_col_f).ceil() as usize).max(1);
+                    let dist = if mouse_int >= start_col && mouse_int < start_col + width {
+                        0
+                    } else if mouse_int >= start_col.saturating_sub(1) && mouse_int < start_col + width + 1 {
+                        1
+                    } else {
+                        continue;
+                    };
+                    if best.is_none() || dist < best.unwrap().1 {
+                        best = Some((i, dist));
+                    }
+                }
+                viewport.hovered = best.map(|(i, _)| i);
             } else {
                 viewport.hovered = None;
             }
@@ -620,7 +864,7 @@ impl App {
     pub fn on_timeline_zoom_in(&mut self) {
         if let Some(ref mut vp) = self.timeline_viewport {
             let center = vp.view_start_ns + vp.view_width_ns / 2.0;
-            vp.view_width_ns *= 0.7;
+            vp.view_width_ns *= 0.5;
             vp.view_start_ns = center - vp.view_width_ns / 2.0;
             self.update_timeline_viewport();
         }
@@ -629,7 +873,7 @@ impl App {
     pub fn on_timeline_zoom_out(&mut self) {
         if let Some(ref mut vp) = self.timeline_viewport {
             let center = vp.view_start_ns + vp.view_width_ns / 2.0;
-            vp.view_width_ns *= 1.4;
+            vp.view_width_ns *= 2.0;
             vp.view_start_ns = center - vp.view_width_ns / 2.0;
             self.update_timeline_viewport();
         }

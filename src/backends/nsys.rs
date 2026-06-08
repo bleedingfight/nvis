@@ -88,4 +88,13 @@ impl ProfilerBackend for NsysBackend {
             Ok(None)
         }
     }
+
+    fn execute_sql(&self, session: &dyn ProfilerSession, sql: &str) -> Result<ProfilerData> {
+        let nsys = session
+            .as_any()
+            .downcast_ref::<NsysSession>()
+            .ok_or_else(|| anyhow::anyhow!("Invalid session type"))?;
+        let conn = nsys.conn()?;
+        db::execute_sql(&conn, sql)
+    }
 }

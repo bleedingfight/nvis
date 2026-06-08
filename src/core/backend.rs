@@ -12,4 +12,7 @@ pub trait ProfilerBackend: Send + Sync {
     fn list_views(&self, session: &dyn ProfilerSession) -> Result<Vec<ViewDescriptor>>;
     fn get_view_data(&self, session: &dyn ProfilerSession, view_id: &str) -> Result<ProfilerData>;
     fn get_stats(&self, session: &dyn ProfilerSession, view_id: &str) -> Result<Option<ProfilerData>>;
+    fn execute_sql(&self, _session: &dyn ProfilerSession, _sql: &str) -> Result<ProfilerData> {
+        Err(anyhow::anyhow!("SQL queries not supported by this backend"))
+    }
 }

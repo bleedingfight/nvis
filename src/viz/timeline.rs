@@ -2,12 +2,10 @@ use anyhow::Result;
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
-    symbols::Marker,
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-
-use ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Rectangle};
+use ratatui::text::{Line, Span};
 use std::collections::HashMap;
 
 use crate::core::types::{ColumnValue, ProfilerData, ViewCategory, ViewDescriptor};
@@ -24,6 +22,7 @@ pub const TIME_AXIS_ROWS: u16 = 2;
 pub const LANE_HEIGHT_ROWS: u16 = 2;
 pub const MIN_PLOT_WIDTH: u16 = 20;
 pub const MIN_PLOT_HEIGHT: u16 = 4;
+pub const MIN_LABEL_COLS: u16 = 12;
 
 pub fn plot_area(inner: Rect) -> Rect {
     Rect {
@@ -58,18 +57,6 @@ pub fn lane_to_row(lane_idx: usize, plot_y: u16) -> u16 {
     plot_y + (lane_idx as u16) * LANE_HEIGHT_ROWS
 }
 
-pub fn format_ns(ns: f64) -> String {
-    if ns >= 1e9 {
-        format!("{:.1}s", ns / 1e9)
-    } else if ns >= 1e6 {
-        format!("{:.1}ms", ns / 1e6)
-    } else if ns >= 1e3 {
-        format!("{:.1}us", ns / 1e3)
-    } else {
-        format!("{:.0}ns", ns)
-    }
-}
-
 pub fn kernel_color(name: &str) -> Color {
     let palette = [
         Color::Cyan,
@@ -93,12 +80,12 @@ fn generate_timeline_data(data: &ProfilerData) -> Vec<TimelineEvent> {
     let name_col = lowered
         .iter()
         .position(|c| c == "name")
+        .or_else(|| lowered.iter().position(|c| c == "kernel"))
         .or_else(|| {
             lowered
                 .iter()
                 .position(|c| c.contains("name") && !c.contains("id"))
-        })
-        .or_else(|| lowered.iter().position(|c| c.contains("kernel")));
+        });
 
     let start_col = lowered.iter().position(|c| c == "start");
     let end_col = lowered.iter().position(|c| c == "end");
@@ -147,7 +134,7 @@ fn generate_timeline_data(data: &ProfilerData) -> Vec<TimelineEvent> {
             _ => continue,
         };
 
-        let duration = if let (Some(_si), Some(ei)) = (Some(start_idx), end_col) {
+        let duration = if let Some(ei) = end_col {
             let end_val = match data.columns[ei].get(row_idx) {
                 Some(ColumnValue::Float(f)) => *f,
                 Some(ColumnValue::Integer(i)) => *i as f64,
@@ -308,6 +295,13 @@ impl VizRenderer for TimelineRenderer {
             return;
         }
 
+        let lane_idx_map: HashMap<i64, usize> = prepared
+            .stream_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, i))
+            .collect();
+
         // Draw lane labels
         for (i, stream_id) in prepared.stream_ids.iter().enumerate() {
             let label = format!(" S{:>5}", stream_id);
@@ -318,15 +312,15 @@ impl VizRenderer for TimelineRenderer {
             );
         }
 
-        // Draw time axis
+        // Draw time axis (relative to view start)
         let num_ticks = (pa.width / 16).max(1) as usize;
         for i in 0..=num_ticks {
-            let ns =
-                viewport.view_start_ns + viewport.view_width_ns * (i as f64 / num_ticks as f64);
-            let col = ns_to_col(ns, viewport.view_start_ns, viewport.view_width_ns, pa.width);
+            let offset_ns =
+                viewport.view_width_ns * (i as f64 / num_ticks as f64);
+            let col = ns_to_col(offset_ns, 0.0, viewport.view_width_ns, pa.width);
             if col >= 0.0 && (col as u16) < pa.width {
                 let x = pa.x + col as u16;
-                let label = format_ns(ns);
+                let label = format_duration(offset_ns);
                 f.render_widget(
                     Paragraph::new(label.clone()).style(Style::default().fg(Color::Gray)),
                     Rect::new(
@@ -343,145 +337,347 @@ impl VizRenderer for TimelineRenderer {
             }
         }
 
-        // Build stream lane index map
-        let lane_idx_map: HashMap<i64, usize> = prepared
-            .stream_ids
-            .iter()
-            .enumerate()
-            .map(|(i, &id)| (id, i))
-            .collect();
-
-        // Canvas for the main plot area
-        let canvas_area = Rect {
-            x: pa.x,
-            y: pa.y,
-            width: pa.width,
-            height: (num_lanes as u16) * LANE_HEIGHT_ROWS,
-        };
-
+        // Build per-lane row data using Paragraph/Spans
         let view_start = viewport.view_start_ns;
         let view_width = viewport.view_width_ns;
-        let x_bounds = [view_start, view_start + view_width];
-        let y_bounds = [0.0, num_lanes as f64];
+        let plot_w = pa.width as usize;
 
-        let canvas = Canvas::default()
-            .marker(Marker::HalfBlock)
-            .x_bounds(x_bounds)
-            .y_bounds(y_bounds)
-            .background_color(Color::Reset)
-            .paint(|ctx| {
-                // Draw selection highlight
-                if let Some((sel_start, sel_end)) = viewport.selection {
-                    ctx.draw(&Rectangle {
-                        x: sel_start,
-                        y: 0.0,
-                        width: sel_end - sel_start,
-                        height: num_lanes as f64,
-                        color: Color::Rgb(60, 60, 80),
-                    });
-                    ctx.layer();
+        // Lane background colors for visual distinction
+        let lane_bg_colors: Vec<Color> = (0..num_lanes)
+            .map(|i| {
+                if i % 2 == 0 {
+                    Color::Rgb(30, 30, 42)
+                } else {
+                    Color::Rgb(38, 38, 50)
                 }
+            })
+            .collect();
 
-                // Draw events
-                for (idx, event) in prepared.events.iter().enumerate() {
-                    let event_end = event.start + event.duration;
-                    if event_end < view_start || event.start > view_start + view_width {
-                        continue;
-                    }
+        // Pre-compute visible events and their column positions
+        struct EventDraw {
+            start_col: usize,
+            width_cols: usize,
+            color: Color,
+            label: Option<String>,
+            is_hovered: bool,
+            is_selected: bool,
+        }
 
-                    let lane_y = *lane_idx_map.get(&event.stream_id).unwrap_or(&0) as f64;
-                    let rect_height = 0.85;
-
-                    let color = match event.event_type {
-                        TimelineEventType::Kernel => kernel_color(&event.name),
-                        TimelineEventType::Memcpy => Color::Magenta,
-                        TimelineEventType::Memset => Color::Yellow,
-                        _ => Color::White,
-                    };
-
-                    let final_color = if viewport.hovered == Some(idx) {
-                        Color::White
-                    } else {
-                        color
-                    };
-
-                    // Ensure minimum visible width
-                    let min_data_width = view_width / (pa.width as f64 * 2.0);
-                    let draw_width = event.duration.max(min_data_width);
-
-                    ctx.draw(&Rectangle {
-                        x: event.start,
-                        y: lane_y,
-                        width: draw_width,
-                        height: rect_height,
-                        color: final_color,
-                    });
+        impl Clone for EventDraw {
+            fn clone(&self) -> Self {
+                Self {
+                    start_col: self.start_col,
+                    width_cols: self.width_cols,
+                    color: self.color,
+                    label: self.label.clone(),
+                    is_hovered: self.is_hovered,
+                    is_selected: self.is_selected,
                 }
-                ctx.layer();
+            }
+        }
 
-                // Draw lane separator lines
-                for i in 1..num_lanes {
-                    ctx.draw(&CanvasLine {
-                        x1: view_start,
-                        y1: i as f64,
-                        x2: view_start + view_width,
-                        y2: i as f64,
-                        color: Color::DarkGray,
-                    });
-                }
+        let mut lane_events: Vec<Vec<EventDraw>> = vec![Vec::new(); num_lanes];
+
+        for (idx, event) in prepared.events.iter().enumerate() {
+            let event_end = event.start + event.duration;
+            if event_end < view_start || event.start > view_start + view_width {
+                continue;
+            }
+
+            let lane_y = *lane_idx_map.get(&event.stream_id).unwrap_or(&0);
+
+            let start_col_f = ns_to_col(event.start, view_start, view_width, pa.width);
+            let end_col_f = ns_to_col(event_end, view_start, view_width, pa.width);
+
+            // Minimum 1 column width so narrow events are always visible
+            let width_cols = ((end_col_f - start_col_f).ceil() as usize).max(1);
+            let start_col = start_col_f.max(0.0) as usize;
+
+            if start_col >= plot_w {
+                continue;
+            }
+
+            let clipped_width = width_cols.min(plot_w - start_col);
+
+            let color = match event.event_type {
+                TimelineEventType::Kernel => kernel_color(&event.name),
+                TimelineEventType::Memcpy => Color::Magenta,
+                TimelineEventType::Memset => Color::Yellow,
+                _ => Color::White,
+            };
+
+            let is_hovered = viewport.hovered == Some(idx);
+            let is_selected = viewport.selection.map_or(false, |(s, e)| {
+                event.start < e && event_end > s
             });
 
-        f.render_widget(canvas, canvas_area);
+            // Label for events wide enough to fit text
+            let label = if clipped_width >= MIN_LABEL_COLS as usize {
+                let dur_text = format_duration(event.duration);
+                let text = format!("{} {}", event.name, dur_text);
+                Some(crate::core::types::truncate_str(&text, clipped_width - 2))
+            } else {
+                None
+            };
 
-        // Draw hover tooltip
+            lane_events[lane_y].push(EventDraw {
+                start_col,
+                width_cols: clipped_width,
+                color: if is_hovered { Color::White } else { color },
+                label,
+                is_hovered,
+                is_selected,
+            });
+        }
+
+        // Build spans for each lane row
+        for (lane_idx, events) in lane_events.iter().enumerate() {
+            let y_top = pa.y + (lane_idx as u16) * LANE_HEIGHT_ROWS;
+            let y_bot = y_top + 1;
+
+            // Build a char buffer and style buffer for the row
+            // We'll use Line with Spans
+            let mut spans_top: Vec<Span> = Vec::new();
+            let mut spans_bot: Vec<Span> = Vec::new();
+
+            // Background: fill with spaces in dark gray
+            let mut col = 0usize;
+
+            // Selection background (if any) covers the entire lane
+            let sel_cols: Option<(usize, usize)> = viewport.selection.map(|(s, e)| {
+                let sc = ns_to_col(s, view_start, view_width, pa.width).max(0.0) as usize;
+                let ec = (ns_to_col(e, view_start, view_width, pa.width).ceil() as usize).min(plot_w);
+                (sc, ec)
+            });
+
+            // Sort events by start_col for sequential span building
+            let mut sorted_events: Vec<&EventDraw> = events.iter().collect();
+            sorted_events.sort_by_key(|e| e.start_col);
+
+            for event in &sorted_events {
+                // Fill gap before this event
+                if event.start_col > col {
+                    let gap_len = event.start_col - col;
+                    let lane_bg = lane_bg_colors[lane_idx];
+                    let gap_bg = if let Some((sc, ec)) = sel_cols {
+                        if col < ec && event.start_col > sc {
+                            Color::Rgb(60, 60, 80)
+                        } else {
+                            lane_bg
+                        }
+                    } else {
+                        lane_bg
+                    };
+                    spans_top.push(Span::styled(" ".repeat(gap_len), Style::default().bg(gap_bg)));
+                    spans_bot.push(Span::styled(" ".repeat(gap_len), Style::default().bg(gap_bg)));
+                    col = event.start_col; // advances col past the gap; overwritten after event draw
+                }
+
+                // Draw event block
+                let event_style = Style::default().fg(event.color);
+                let event_style_bg = if event.is_selected {
+                    Style::default().fg(event.color).bg(Color::Rgb(60, 60, 80))
+                } else {
+                    event_style
+                };
+
+                if let Some(ref label) = event.label {
+                    // Wide enough to show text: render as colored text on colored bg
+                    let text_style = if event.is_hovered {
+                        Style::default().fg(Color::Black).bg(Color::White)
+                    } else if event.is_selected {
+                        Style::default().fg(Color::White).bg(Color::Rgb(60, 60, 80))
+                    } else {
+                        Style::default().fg(Color::Black).bg(event.color)
+                    };
+                    let padded = format!(" {} ", label);
+                    let text = if padded.len() > event.width_cols {
+                        crate::core::types::truncate_str(&padded, event.width_cols)
+                    } else {
+                        let mut s = padded;
+                        // Pad to fill the block width
+                        while s.len() < event.width_cols {
+                            s.push(' ');
+                        }
+                        s
+                    };
+                    spans_top.push(Span::styled(text.clone(), text_style));
+                    // Bottom row: all filled blocks
+                    spans_bot.push(Span::styled(
+                        "█".repeat(event.width_cols),
+                        event_style_bg,
+                    ));
+                } else {
+                    // Narrow event: two rows of filled blocks
+                    spans_top.push(Span::styled("█".repeat(event.width_cols), event_style_bg));
+                    spans_bot.push(Span::styled("█".repeat(event.width_cols), event_style_bg));
+                }
+
+                col = event.start_col + event.width_cols;
+            }
+
+            // Fill remaining gap after last event
+            if col < plot_w {
+                let gap_len = plot_w - col;
+                let lane_bg = lane_bg_colors[lane_idx];
+                spans_top.push(Span::styled(" ".repeat(gap_len), Style::default().bg(lane_bg)));
+                spans_bot.push(Span::styled(" ".repeat(gap_len), Style::default().bg(lane_bg)));
+            }
+
+            // Render the two rows for this lane
+            f.render_widget(
+                Paragraph::new(Line::from(spans_top)),
+                Rect::new(pa.x, y_top, pa.width, 1),
+            );
+            f.render_widget(
+                Paragraph::new(Line::from(spans_bot)),
+                Rect::new(pa.x, y_bot, pa.width, 1),
+            );
+
+            // Draw lane separator line
+            let sep_y = y_top + LANE_HEIGHT_ROWS;
+            if sep_y < pa.y + pa.height && lane_idx + 1 < num_lanes {
+                let sep_line: Line = vec![Span::styled(
+                    "─".repeat(plot_w),
+                    Style::default().fg(Color::DarkGray),
+                )]
+                .into();
+                f.render_widget(
+                    Paragraph::new(sep_line),
+                    Rect::new(pa.x, sep_y, pa.width, 1),
+                );
+            }
+        }
+
+        // Draw hover tooltip near the hovered event
         if let Some(hovered_idx) = viewport.hovered {
             if let Some(event) = prepared.events.get(hovered_idx) {
-                let dur_text = if event.duration >= 1e6 {
-                    format!("{:.1}ms", event.duration / 1e6)
-                } else if event.duration >= 1e3 {
-                    format!("{:.1}us", event.duration / 1e3)
-                } else {
-                    format!("{:.0}ns", event.duration)
-                };
-                let tooltip = crate::core::types::truncate_str(
+                let dur_text = format_duration(event.duration);
+                let tooltip_text = crate::core::types::truncate_str(
                     &format!("{} | {}", event.name, dur_text),
                     50,
                 );
-                let tooltip_w = (tooltip.len() as u16 + 2).min(inner.width);
+                let tooltip_w = (tooltip_text.len() as u16 + 2).min(inner.width);
+                let lane = *lane_idx_map.get(&event.stream_id).unwrap_or(&0);
+                let event_col = ns_to_col(event.start, view_start, view_width, pa.width) as u16;
+                // Position tooltip to the right of the event start, on the row above the lane
+                let tooltip_x = (pa.x + event_col + 2).min(inner.x + inner.width.saturating_sub(tooltip_w + 2));
+                let tooltip_y = if lane == 0 { inner.y + TIME_AXIS_ROWS } else { pa.y + (lane as u16) * LANE_HEIGHT_ROWS - 1 };
                 let tooltip_area = Rect {
-                    x: inner.x + inner.width.saturating_sub(tooltip_w + 2),
-                    y: inner.y + 1,
+                    x: tooltip_x,
+                    y: tooltip_y,
                     width: tooltip_w,
                     height: 1,
                 };
                 f.render_widget(
-                    Paragraph::new(tooltip)
+                    Paragraph::new(format!(" {} ", tooltip_text))
                         .style(Style::default().fg(Color::White).bg(Color::DarkGray)),
                     tooltip_area,
                 );
             }
         }
 
-        // Draw selection duration indicator
-        if let Some((start_ns, end_ns)) = viewport.selection {
-            let dur_us = (end_ns - start_ns) / 1000.0;
-            let sel_text = if dur_us >= 1000.0 {
-                format!("Selected: {:.1}ms", dur_us / 1000.0)
-            } else {
-                format!("Selected: {:.1}us", dur_us)
-            };
-            let sel_w = (sel_text.len() as u16 + 2).min(inner.width);
-            let sel_area = Rect {
-                x: inner.x + 1,
-                y: inner.y + inner.height.saturating_sub(2),
-                width: sel_w,
-                height: 1,
-            };
-            f.render_widget(
-                Paragraph::new(sel_text)
-                    .style(Style::default().fg(Color::Yellow).bg(Color::DarkGray)),
-                sel_area,
-            );
+        // Draw bottom info bar
+        {
+            let mut info_spans: Vec<Span> = Vec::new();
+
+            // Use time-range overlap (exact, no column rounding)
+            let mut overlapping: Vec<usize> = Vec::new();
+            if let Some((sel_start, sel_end)) = viewport.selection {
+                for (i, e) in prepared.events.iter().enumerate() {
+                    if e.start < sel_end && e.start + e.duration > sel_start {
+                        overlapping.push(i);
+                    }
+                }
+            }
+
+            // Sort: hovered first, then shortest duration first
+            overlapping.sort_by(|a, b| {
+                let a_h = viewport.hovered == Some(*a);
+                let b_h = viewport.hovered == Some(*b);
+                b_h.cmp(&a_h).then_with(|| {
+                    prepared.events[*a].duration.partial_cmp(&prepared.events[*b].duration).unwrap_or(std::cmp::Ordering::Equal)
+                })
+            });
+
+            let max_shown = 5;
+            let mut shown = 0usize;
+            let mut overflow = 0usize;
+
+            for idx in overlapping {
+                if shown >= max_shown {
+                    overflow += 1;
+                    continue;
+                }
+                if shown > 0 {
+                    info_spans.push(Span::styled(" ", Style::default().fg(Color::Yellow).bg(Color::DarkGray)));
+                }
+                shown += 1;
+                let e = &prepared.events[idx];
+                let color = match e.event_type {
+                    TimelineEventType::Kernel => kernel_color(&e.name),
+                    TimelineEventType::Memcpy => Color::Magenta,
+                    TimelineEventType::Memset => Color::Yellow,
+                    _ => Color::White,
+                };
+                let name = crate::core::types::truncate_str(&e.name, 15);
+                let dur = format_duration(e.duration);
+                info_spans.push(Span::styled(
+                    format!(" {} {} ", name, dur),
+                    Style::default().fg(Color::Black).bg(color),
+                ));
+            }
+
+            if overflow > 0 {
+                info_spans.push(Span::styled(
+                    format!(" +{}more ", overflow),
+                    Style::default().fg(Color::Yellow).bg(Color::DarkGray),
+                ));
+            }
+
+            if shown == 0 {
+                if let Some(hi) = viewport.hovered {
+                    if let Some(e) = prepared.events.get(hi) {
+                        let color = match e.event_type {
+                            TimelineEventType::Kernel => kernel_color(&e.name),
+                            TimelineEventType::Memcpy => Color::Magenta,
+                            TimelineEventType::Memset => Color::Yellow,
+                            _ => Color::White,
+                        };
+                        let name = crate::core::types::truncate_str(&e.name, 30);
+                        let dur = format_duration(e.duration);
+                        info_spans.push(Span::styled(
+                            format!(" {} {} ", name, dur),
+                            Style::default().fg(Color::Black).bg(color),
+                        ));
+                    }
+                } else if let Some((s, e)) = viewport.selection {
+                    let us = (e - s) / 1000.0;
+                    let txt = if us >= 1000.0 { format!("Selected: {:.1}ms", us / 1000.0) } else { format!("Selected: {:.1}us", us) };
+                    info_spans.push(Span::styled(txt, Style::default().fg(Color::Yellow).bg(Color::DarkGray)));
+                }
+            }
+
+            if !info_spans.is_empty() {
+                let info_w = inner.width.saturating_sub(2);
+                let info_area = Rect {
+                    x: inner.x + 1,
+                    y: inner.y + inner.height.saturating_sub(2),
+                    width: info_w,
+                    height: 1,
+                };
+                f.render_widget(Paragraph::new(Line::from(info_spans)), info_area);
+            }
         }
+    }
+}
+
+fn format_duration(ns: f64) -> String {
+    if ns >= 1e6 {
+        format!("{:.1}ms", ns / 1e6)
+    } else if ns >= 1e3 {
+        format!("{:.1}us", ns / 1e3)
+    } else {
+        format!("{:.0}ns", ns)
     }
 }

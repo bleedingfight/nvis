@@ -83,12 +83,10 @@ pub fn get_view_data(conn: &Connection, view_id: &str) -> Result<ProfilerData> {
     let tn = view_id.to_uppercase();
     let is_timeline = tn.contains("KERNEL") || tn.contains("MEMCPY") || tn.contains("MEMSET");
 
-    // Specialized MEMCPY path: resolve enum IDs for readable names
     if tn.contains("CUPTI_ACTIVITY_KIND_MEMCPY") {
         return get_memcpy_data(conn, view_id);
     }
 
-    // Check if the table has a nameId column and StringIds table exists
     let has_name_id = has_nameid_column(conn, view_id)?;
     let has_string_ids = has_stringids_table(conn)?;
 
@@ -107,9 +105,16 @@ fn has_nameid_column(conn: &Connection, table: &str) -> Result<bool> {
         .query_map([], |row| row.get::<_, String>(1))?
         .filter_map(|r| r.ok())
         .collect();
-    Ok(cols
-        .iter()
-        .any(|c| c.eq_ignore_ascii_case("nameId") || c.to_lowercase() == "nameid"))
+    let cl = |c: &str| c.to_lowercase();
+    Ok(cols.iter().any(|c| {
+        let lc = cl(c);
+        lc == "nameid"
+            || lc == "name_id"
+            || (lc.contains("name") && lc.contains("id"))
+            || lc == "demangledname"
+            || lc == "shortname"
+            || lc == "mangledname"
+    }))
 }
 
 fn has_stringids_table(conn: &Connection) -> Result<bool> {
@@ -160,7 +165,6 @@ fn get_view_data_plain(conn: &Connection, table: &str, limit: usize) -> Result<P
         row_count += 1;
     }
 
-    // Rebuild schema with actual column names from SELECT
     let final_schema: Vec<ColumnSchema> = column_names
         .iter()
         .zip(schema.iter())
@@ -197,9 +201,18 @@ fn get_view_data_resolved(conn: &Connection, table: &str, limit: usize) -> Resul
         })
         .collect();
 
+    // Find which column to JOIN on StringIds: prefer nameId, else demangledName/shortName
+    let join_col = col_info
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("nameId"))
+        .or_else(|| col_info.iter().find(|(name, _)| name.eq_ignore_ascii_case("demangledName")))
+        .or_else(|| col_info.iter().find(|(name, _)| name.eq_ignore_ascii_case("shortName")))
+        .map(|(name, _)| name.clone())
+        .unwrap_or_else(|| "nameId".to_string());
+
     let query = format!(
-        "SELECT r.*, s.value as name FROM {} r LEFT JOIN StringIds s ON s.id = r.nameId LIMIT {}",
-        table, limit
+        "SELECT r.*, s.value as name FROM {} r LEFT JOIN StringIds s ON s.id = r.{} LIMIT {}",
+        table, join_col, limit
     );
 
     let mut stmt = conn.prepare(&query)?;
@@ -231,7 +244,6 @@ fn get_view_data_resolved(conn: &Connection, table: &str, limit: usize) -> Resul
                     dtype: schema[i].dtype.clone(),
                 }
             } else {
-                // The appended 'name' column from LEFT JOIN
                 ColumnSchema {
                     name: name.clone(),
                     dtype: ColumnType::Text,
@@ -247,13 +259,129 @@ fn get_view_data_resolved(conn: &Connection, table: &str, limit: usize) -> Resul
     })
 }
 
+/// Execute an arbitrary SQL query and return results as ProfilerData.
+/// Limits output to 500 rows for safety.
+/// Also supports sqlite3 dot-commands (.tables, .schema, etc.) by translating them to SQL.
+pub fn execute_sql(conn: &Connection, sql: &str) -> Result<ProfilerData> {
+    let trimmed = sql.trim();
+    if let Some(dot_cmd) = translate_dot_command(trimmed) {
+        return execute_sql(conn, &dot_cmd);
+    }
+
+    let mut stmt = conn.prepare(trimmed)?;
+    let col_count = stmt.column_count();
+    let col_names: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
+
+    let mut schema = Vec::new();
+    let mut columns: Vec<Vec<ColumnValue>> = Vec::new();
+    for name in &col_names {
+        schema.push(ColumnSchema {
+            name: name.clone(),
+            dtype: ColumnType::Unknown,
+        });
+        columns.push(Vec::new());
+    }
+
+    let mut row_count = 0usize;
+    let rows = stmt.query_map([], |row| {
+        let mut vals = Vec::new();
+        for i in 0..col_count {
+            let val: Result<String, _> = row.get(i);
+            vals.push(val.unwrap_or_else(|_| "NULL".to_string()));
+        }
+        Ok(vals)
+    })?;
+
+    for row_result in rows {
+        if row_count >= 500 {
+            break;
+        }
+        let vals = row_result?;
+        for (i, v) in vals.into_iter().enumerate() {
+            columns[i].push(ColumnValue::Text(v));
+        }
+        row_count += 1;
+    }
+
+    if row_count > 0 {
+        for (i, col) in columns.iter_mut().enumerate() {
+            if let Some(ColumnValue::Text(s)) = col.first() {
+                let dtype = if s.parse::<i64>().is_ok() {
+                    ColumnType::Integer
+                } else if s.parse::<f64>().is_ok() {
+                    ColumnType::Float
+                } else {
+                    ColumnType::Text
+                };
+                schema[i].dtype = dtype;
+            }
+        }
+    }
+
+    Ok(ProfilerData {
+        schema,
+        columns,
+        row_count,
+    })
+}
+
+/// Translate sqlite3 dot-commands to equivalent SQL.
+fn translate_dot_command(input: &str) -> Option<String> {
+    if !input.starts_with('.') {
+        return None;
+    }
+    let parts: Vec<&str> = input.splitn(2, ' ').collect();
+    let cmd = parts[0].to_lowercase();
+    let arg = parts.get(1).unwrap_or(&"").trim();
+
+    match cmd.as_str() {
+        ".tables" | ".table" => {
+            if arg.is_empty() {
+                Some("SELECT name FROM sqlite_master WHERE type IN ('table','view') ORDER BY name".into())
+            } else {
+                Some(format!(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name LIKE '%{}%' ORDER BY name",
+                    arg.replace('\'', "''")
+                ))
+            }
+        }
+        ".schema" => {
+            if arg.is_empty() {
+                Some("SELECT sql FROM sqlite_master WHERE type IN ('table','view','index','trigger') ORDER BY name".into())
+            } else {
+                Some(format!(
+                    "SELECT sql FROM sqlite_master WHERE type IN ('table','view','index','trigger') AND name LIKE '%{}%'",
+                    arg.replace('\'', "''")
+                ))
+            }
+        }
+        ".indexes" | ".index" => {
+            if arg.is_empty() {
+                Some("SELECT name, tbl_name FROM sqlite_master WHERE type='index' ORDER BY name".into())
+            } else {
+                Some(format!(
+                    "SELECT name, tbl_name FROM sqlite_master WHERE type='index' AND tbl_name LIKE '%{}%' ORDER BY name",
+                    arg.replace('\'', "''")
+                ))
+            }
+        }
+        ".databases" | ".dbs" => {
+            Some("PRAGMA database_list".into())
+        }
+        ".headers" => None,
+        ".mode" => None,
+        ".quit" | ".exit" => None,
+        _ => None,
+    }
+}
+
 fn sqlite_type_to_column_type(typ: &str) -> ColumnType {
     match typ.to_uppercase().as_str() {
         "INTEGER" | "INT" | "BIGINT" | "SMALLINT" | "TINYINT" => ColumnType::Integer,
         "REAL" | "FLOAT" | "DOUBLE" | "NUMERIC" | "DECIMAL" => ColumnType::Float,
         "TEXT" | "VARCHAR" | "CHAR" | "CLOB" => ColumnType::Text,
         "BLOB" => ColumnType::Unknown,
-        "" => ColumnType::Unknown, // SQLite allows typeless columns
+        "" => ColumnType::Unknown,
         _ => ColumnType::Unknown,
     }
 }
@@ -288,7 +416,6 @@ fn get_memcpy_data(conn: &Connection, table: &str) -> Result<ProfilerData> {
         })
         .collect();
 
-    // Build a query that resolves enum IDs and nameId for MEMCPY
     let query = format!(
         "SELECT r.*, \
          s.value as name, \

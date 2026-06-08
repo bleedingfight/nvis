@@ -87,22 +87,23 @@ fn category_label(cat: &ViewCategory) -> &str {
 fn draw_view_browser(f: &mut Frame, app: &App) {
     let area = f.area();
 
-    let main_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
-        .split(area);
+    let is_timeline = app.views
+        .get(app.selected_view_index)
+        .map_or(false, |v| v.category == ViewCategory::Timeline);
 
-    draw_view_list(f, app, main_chunks[0]);
+    let (left, _right, right_chunks) = layout_chunks(area, is_timeline);
 
-    let right_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(main_chunks[1]);
-
+    draw_view_list(f, app, left);
     draw_chart(f, app, right_chunks[0]);
-    draw_data_table(f, app, right_chunks[1]);
 
-    draw_help_bar(f, area);
+    if is_timeline {
+        draw_sql_input(f, app, right_chunks[1]);
+        draw_sql_result(f, app, right_chunks[2]);
+    } else {
+        draw_data_table(f, app, right_chunks[1]);
+    }
+
+    draw_help_bar(f, area, is_timeline);
 }
 
 fn draw_view_list(f: &mut Frame, app: &App, area: Rect) {
@@ -220,6 +221,99 @@ fn draw_data_table(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn draw_sql_input(f: &mut Frame, app: &App, area: Rect) {
+    let input_text = app.sql_input.value();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("SQL (Enter to execute)")
+        .border_style(if app.focus == Focus::SqlInput {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        });
+
+    let paragraph = Paragraph::new(input_text).block(block);
+    f.render_widget(paragraph, area);
+
+    if app.focus == Focus::SqlInput {
+        let cursor_pos = app.sql_input.cursor();
+        f.set_cursor_position((area.x + cursor_pos as u16 + 1, area.y + 1));
+    }
+}
+
+fn draw_sql_result(f: &mut Frame, app: &App, area: Rect) {
+    let title = if app.sql_error.is_some() {
+        "SQL Error"
+    } else {
+        "SQL Result"
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(if app.focus == Focus::SqlResult {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        });
+
+    if let Some(ref err) = app.sql_error {
+        let paragraph = Paragraph::new(err.as_str())
+            .style(Style::default().fg(Color::Red))
+            .block(block);
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    if let Some(ref data) = app.sql_result {
+        let available_height = area.height.saturating_sub(3) as usize;
+        let start_row = app.sql_scroll;
+        let end_row = (start_row + available_height).min(data.row_count);
+
+        let (headers, rows_str) = data.to_row_strings();
+
+        let header_cells = headers.iter().map(|c| Cell::from(c.as_str()));
+        let header = Row::new(header_cells)
+            .style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .height(1);
+
+        let rows: Vec<Row> = rows_str[start_row..end_row]
+            .iter()
+            .map(|row| {
+                let cells = row.iter().map(|c| {
+                    let content = if c.chars().count() > 20 {
+                        truncate_str(c, 17)
+                    } else {
+                        c.clone()
+                    };
+                    Cell::from(content)
+                });
+                Row::new(cells).height(1)
+            })
+            .collect();
+
+        let col_count = headers.len().max(1);
+        let col_width = (area.width.saturating_sub(2)) / col_count as u16;
+        let widths: Vec<Constraint> = (0..col_count)
+            .map(|_| Constraint::Length(col_width.max(8)))
+            .collect();
+
+        let table = Table::new(rows, &widths)
+            .header(header)
+            .block(block)
+            .column_spacing(1);
+
+        f.render_widget(table, area);
+    } else {
+        let paragraph = Paragraph::new("Enter a SQL query above and press Enter").block(block);
+        f.render_widget(paragraph, area);
+    }
+}
+
 fn draw_stats_view(f: &mut Frame, app: &App) {
     let area = f.area();
 
@@ -228,10 +322,8 @@ fn draw_stats_view(f: &mut Frame, app: &App) {
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(area);
 
-    // Top: chart visualization
     draw_chart(f, app, chunks[0]);
 
-    // Bottom: stats table
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Aggregated Statistics")
@@ -293,7 +385,35 @@ fn draw_stats_view(f: &mut Frame, app: &App) {
         f.render_widget(paragraph, chunks[1]);
     }
 
-    draw_help_bar(f, area);
+    draw_help_bar(f, area, false);
+}
+
+/// Compute the main layout chunks shared by draw and mouse handlers.
+pub fn layout_chunks(area: Rect, is_timeline: bool) -> (Rect, Rect, Vec<Rect>) {
+    let main_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+        .split(area);
+
+    let right_constraints = if is_timeline {
+        vec![
+            Constraint::Percentage(40),
+            Constraint::Length(3),
+            Constraint::Percentage(57),
+        ]
+    } else {
+        vec![
+            Constraint::Percentage(40),
+            Constraint::Percentage(60),
+        ]
+    };
+
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(right_constraints)
+        .split(main_chunks[1]);
+
+    (main_chunks[0], main_chunks[1], right_chunks.to_vec())
 }
 
 pub fn compute_chart_area(area: Rect) -> Rect {
@@ -310,9 +430,12 @@ pub fn compute_chart_area(area: Rect) -> Rect {
     right_chunks[0]
 }
 
-fn draw_help_bar(f: &mut Frame, area: Rect) {
-    let help_text =
-        " [q/Esc]Quit [↑↓]Nav [←→/h/l]Pan [Tab]Switch [Enter]Select [s]Stats [b]Back [+/-]Zoom [r]Reset [Drag]Select ";
+fn draw_help_bar(f: &mut Frame, area: Rect, is_timeline: bool) {
+    let help_text = if is_timeline {
+        " [q/Esc]Quit [↑↓]Nav [←→/h/l]Pan [Tab]Switch [Enter]ExecSQL [s]Stats [b]Back [+/-]Zoom [r]Reset [Ctrl+M]Mouse/Copy [Drag]Select "
+    } else {
+        " [q/Esc]Quit [↑↓]Nav [←→/h/l]Pan [Tab]Switch [Enter]Select [s]Stats [b]Back [+/-]Zoom [r]Reset [Ctrl+M]Mouse/Copy [Drag]Select "
+    };
     let help = Paragraph::new(help_text)
         .style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .alignment(Alignment::Center);
