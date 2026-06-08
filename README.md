@@ -1,29 +1,23 @@
-# NVIS - NSYS SQLite3 TUI Viewer
+# NVIS - Universal Profiler Viewer
 
-A Terminal User Interface (TUI) tool for visualizing and exploring NVIDIA Nsight Systems (nsys) SQLite3 database files with intelligent visualization selection.
+A Terminal User Interface (TUI) tool for visualizing and exploring profiler data from multiple sources — NVIDIA Nsight Systems, NVIDIA Nsight Compute, and PyTorch Profiler.
 
 ## Features
 
-- **File Selection Interface**: Easy-to-use file path input for loading SQLite databases
-- **Table Browser**: Left sidebar showing all available tables in the database
-- **Smart Data Visualization**: Automatically selects the best visualization based on table type
-  - **Box Plot**: CUDA API call statistics with min/max/median/mean/quartiles
-  - **Timeline**: Kernel execution sequences with duration bars
+- **Auto-detection**: Automatically identifies the profiler format (nsys SQLite, ncu CSV, torch Chrome Trace JSON)
+- **Multiple Backends**:
+  - **nsys**: SQLite3 database from `nsys export -t sqlite`
+  - **ncu**: CSV export from `ncu --csv`
+  - **torch**: Chrome Trace JSON from `torch.profiler.profile`
+- **Smart Visualization**: Automatically selects the best chart type per view
+  - **Box Plot**: API call latency statistics (min/max/median/Q1/Q3/mean)
+  - **Timeline**: Kernel and operation execution sequences
+  - **Bar Chart**: General numeric data
   - **Statistics**: Numerical summaries and metadata
-  - **Bar Chart**: General-purpose data visualization
-- **Interactive Navigation**:
-  - Keyboard controls (arrow keys, Tab, Enter)
-  - Mouse support (clicking and scrolling)
-  - Multiple focus areas for efficient navigation
+- **Interactive Navigation**: Keyboard and mouse controls with multiple focus areas
+- **Extensible Architecture**: Trait-based plugin system — add new profiler backends or visualization types without modifying core code
 
 ## Installation
-
-### Prerequisites
-
-- Rust (1.70 or later)
-- Cargo
-
-### Build from Source
 
 ```bash
 git clone <repository-url>
@@ -31,140 +25,143 @@ cd nvis
 cargo build --release
 ```
 
-The binary will be available at `target/release/nvis`.
+The binary is at `target/release/nvis`.
 
 ## Usage
 
-### Starting the Application
+### Command Line
 
 ```bash
-cargo run
-# or
-./target/release/nvis
+# Open a file directly (auto-detect format)
+nvis /path/to/profile.sqlite
+nvis /path/to/ncu_report.csv
+nvis /path/to/trace.json
+
+# Start with file selection UI
+nvis
 ```
 
-### Navigation
+### Step-by-step
 
-#### File Selection Screen
+1. **Launch** — run `nvis` or `nvis <file>`
+2. **Select file** — type the path and press `Enter` (or pass it as CLI argument)
+3. **Browse views** — left panel lists available views with category icons
+4. **View data** — right side shows chart (top) and data table (bottom)
+5. **Statistics** — press `s` to see aggregated statistics, `b` to go back
 
-1. Type or paste the path to your NSYS SQLite database file
-2. Press `Enter` to load the database
-3. Press `q` or `Esc` to quit
-   - **Note:** When typing in the file path input, 'q' will be treated as a regular character
+### Generating Profiler Data
 
-#### Table View Screen
-
-**Keyboard Controls:**
-- `↑/↓` - Navigate through tables (when focused on table list) or scroll data
-- `←/→` - Switch focus between table list and data panels
-- `Tab` - Cycle through focus areas (Table List → Chart → Data Table)
-- `Enter` - Load selected table data
-- `q` or `Esc` - Quit application (when not in input mode)
-
-**Mouse Controls:**
-- Click on panels to focus them
-- Scroll wheel to navigate through lists and data
-- Click on table names to select them
-
-**Focus Areas:**
-1. **Table List** (left sidebar): Browse and select tables
-2. **Chart** (top right): View bar chart visualization of numeric data
-3. **Data Table** (bottom right): View raw table data in tabular format
-
-### Layout
-
-```
-┌─────────────┬──────────────────────────────┐
-│   Tables    │      Visualization           │
-│             │      (Bar Chart)             │
-│  - Table1   │                              │
-│  - Table2   ├──────────────────────────────┤
-│  - Table3   │                              │
-│  - ...      │      Data Table              │
-│             │      (Rows & Columns)        │
-│             │                              │
-└─────────────┴──────────────────────────────┘
-[q]Quit [↑↓]Navigate [←→]Focus [Tab]Switch...
+**nsys** (system-wide GPU profiling):
+```bash
+nsys profile -o myapp ./myapp
+nsys export -t sqlite myapp.nsys-rep
+# Open the .sqlite file in nvis
 ```
 
-## Features in Detail
+**ncu** (per-kernel deep analysis):
+```bash
+ncu --csv -o report.csv ./myapp
+# Open the .csv file in nvis
+```
 
-### Data Loading
-- Loads all tables from the SQLite database
-- Supports up to 1000 rows per table for performance
-- Handles various SQLite data types (INTEGER, REAL, TEXT, BLOB)
+**torch** (PyTorch profiler):
+```python
+import torch.profiler as profiler
 
-### Visualization
-- Automatically detects numeric columns for charting
-- Bar chart shows up to 10 data points at a time
-- Scroll through chart data using mouse or keyboard when chart is focused
+with profiler.profile(
+    activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.CUDA],
+    record_shapes=True,
+) as prof:
+    # your model code here
+    pass
 
-### Data Table
-- Displays all columns with headers
-- Truncates long cell values (>20 chars) with ellipsis
-- Scrollable view for large datasets
-- Dynamic column width adjustment
+prof.export_chrome_trace("trace.json")
+# Open trace.json in nvis
+```
+
+## Controls
+
+| Key | Action |
+|-----|--------|
+| `q` / `Esc` | Quit (not in input mode) |
+| `↑` `↓` | Navigate / scroll |
+| `←` `→` | Switch focus panel |
+| `Tab` | Cycle focus areas |
+| `Enter` | Confirm / load |
+| `s` | Enter statistics view |
+| `b` | Back from statistics |
+| Mouse click | Focus panel |
+| Mouse wheel | Scroll |
+
+### Focus Areas
+
+In the main view, `Tab` cycles: **View List** → **Chart** → **Data Table**
+
+In statistics view, `Tab` toggles: **Chart** ↔ **Stats Table**
+
+Yellow border = focused panel.
+
+## Layout
+
+```
+┌──────────────┬───────────────────────────────┐
+│   Views      │   Visualization               │
+│              │   (Box Plot / Timeline / ...)   │
+│  ⏱ CUDA K.. ├───────────────────────────────┤
+│  📊 Runtime  │                               │
+│  📈 Memory   │   Data Table                  │
+│  ℹ  Target   │   (Rows & Columns)            │
+│  📋 String.. │                               │
+└──────────────┴───────────────────────────────┘
+[q]Quit [↑↓]Navigate [←→]Focus [Tab]Switch [s]Stats [b]Back
+```
+
+## Feature Gates
+
+```toml
+# Default: all backends enabled
+cargo build --release
+
+# Only nsys
+cargo build --release --no-default-features --features nsys
+
+# nsys + ncu
+cargo build --release --no-default-features --features "nsys,ncu"
+```
+
+| Feature | Backend | Extra dependencies |
+|---------|---------|--------------------|
+| `nsys` | Nsight Systems SQLite | rusqlite |
+| `ncu` | Nsight Compute CSV | csv |
+| `torch` | PyTorch Chrome Trace JSON | serde, serde_json |
+
+## Architecture
+
+```
+src/
+  core/         — traits (ProfilerBackend, ProfilerSession, VizRenderer) + Registry
+  backends/     — nsys, ncu, torch implementations
+  viz/          — boxplot, timeline, barchart, statistics renderers
+  app.rs        — App state machine (generic over any backend)
+  ui.rs         — TUI rendering (dispatches to VizRenderer::draw)
+  main.rs       — Registry setup + event loop
+```
+
+To add a new profiler backend:
+1. Create `src/backends/your_backend.rs` implementing `ProfilerBackend`
+2. Create a `ProfilerSession` implementation holding your parsed data
+3. Register it in `backends::register_all()`
+4. Done — no changes to `app.rs`, `ui.rs`, or `viz/`
 
 ## Technical Details
 
-### Built With
-- [ratatui](https://github.com/ratatui-org/ratatui) - Terminal UI framework
-- [crossterm](https://github.com/crossterm-rs/crossterm) - Terminal manipulation
-- [rusqlite](https://github.com/rusqlite/rusqlite) - SQLite bindings
-- [tui-input](https://github.com/sayanarijit/tui-input) - Text input widget
-
-### Project Structure
-
-```
-nvis/
-├── src/
-│   ├── main.rs      # Entry point and event loop
-│   ├── app.rs       # Application state management
-│   ├── db.rs        # SQLite database operations
-│   └── ui.rs        # UI rendering logic
-├── Cargo.toml       # Dependencies and project config
-└── README.md        # This file
-```
-
-## Example NSYS Database
-
-To test with an actual NSYS database:
-
-1. Profile an application with NVIDIA Nsight Systems:
-   ```bash
-   nsys profile -o myapp ./myapp
-   ```
-
-2. This creates a `.nsys-rep` file which contains a SQLite database
-
-3. Export or directly use the SQLite database:
-   ```bash
-   nsys export -t sqlite myapp.nsys-rep
-   ```
-
-4. Load the database file in NVIS
-
-## Known Limitations
-
-- Currently loads only the first 1000 rows per table for performance
-- Chart visualization limited to numeric columns
-- Bar chart shows maximum 10 data points at once (use scroll to see more)
-- Static labels in chart due to lifetime constraints
-
-## Future Enhancements
-
-- [ ] Support for more chart types (line, scatter, etc.)
-- [ ] Column sorting and filtering
-- [ ] Search functionality
-- [ ] Export data to CSV
-- [ ] Custom SQL query interface
-- [ ] Configuration file support
-- [ ] Theme customization
+- Columnar `ProfilerData` storage — no string→float re-parsing
+- `Mutex<Connection>` for nsys (single shared connection)
+- CSV parsed once into memory for ncu
+- JSON parsed once into memory for torch
+- 1000-row limit on data loading for performance
+- Cell values truncated to 20 chars in tables
 
 ## License
 
-MIT License (or your preferred license)
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit pull requests or open issues.
+MIT

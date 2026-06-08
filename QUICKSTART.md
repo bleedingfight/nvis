@@ -1,150 +1,42 @@
-# 快速开始指南
+# Quick Start
 
-## 安装依赖
-
-确保已安装 Rust 和 Cargo:
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-## 编译项目
+## Build
 
 ```bash
-# 开发版本
-cargo build
-
-# 发布版本 (优化)
 cargo build --release
 ```
 
-## 创建测试数据库
-
-项目包含了一个脚本用于创建示例数据库:
+## Run
 
 ```bash
-./create_sample_db.sh
-```
+# With a file (auto-detect format)
+./target/release/nvis report.sqlite
+./target/release/nvis ncu_report.csv
+./target/release/nvis trace.json
 
-这会创建一个 `sample.db` 文件,包含模拟的 NSYS 性能数据。
-
-## 运行程序
-
-```bash
-# 开发模式
-cargo run
-
-# 或直接运行编译好的二进制文件
+# Without a file (use TUI file selector)
 ./target/release/nvis
 ```
 
-## 使用步骤
+## Prepare Profiler Data
 
-1. **启动程序**后,会看到文件选择界面
+```bash
+# nsys
+nsys profile -o myapp ./myapp
+nsys export -t sqlite myapp.nsys-rep   # produces .sqlite
 
-2. **输入数据库路径**:
-   - 输入: `/home/liushuai/nvis/sample.db` (或你的实际路径)
-   - 按 `Enter` 加载数据库
+# ncu
+ncu --csv -o report.csv ./myapp        # produces .csv
 
-3. **浏览表格**:
-   - 左侧面板显示所有表格
-   - 使用 `↑/↓` 键选择表格
-   - 按 `Enter` 加载表格数据
-
-4. **查看数据**:
-   - 右上方:数据可视化(柱状图)
-   - 右下方:原始数据表格
-   - 使用 `Tab` 切换焦点区域
-
-5. **交互操作**:
-   - `←/→`: 在左右面板间切换
-   - `Tab`: 循环切换焦点(表格列表 → 图表 → 数据表)
-   - `↑/↓`: 滚动列表或数据
-   - 鼠标滚轮: 滚动数据
-   - 鼠标点击: 选择面板
-
-6. **退出程序**:
-   - 按 `q` 或 `Esc` (非输入状态下)
-   - **注意**: 在输入文件路径时,`q` 会作为普通字符输入,`Esc` 不执行任何操作
-
-## 键盘快捷键总览
-
-| 按键 | 功能 |
-|------|------|
-| `q` / `Esc` | 退出程序 (非输入状态下) |
-| `↑` | 向上移动/滚动 |
-| `↓` | 向下移动/滚动 |
-| `←` | 切换到左侧面板 / 光标左移 (输入状态下) |
-| `→` | 切换到右侧面板 / 光标右移 (输入状态下) |
-| `Home` | 光标移到开头 (输入状态下) |
-| `End` | 光标移到末尾 (输入状态下) |
-| `Tab` | 循环切换焦点区域 |
-| `Enter` | 加载/确认 |
-| 字母/数字 | 文件路径输入 (输入状态下) |
-| `Backspace` | 删除前一个字符 (输入状态下) |
-| `Delete` | 删除后一个字符 (输入状态下) |
-
-## 界面布局
-
-```
-┌─────────────────┬────────────────────────────────┐
-│  Tables         │  Visualization (Chart)         │
-│                 │                                │
-│  □ events       │  ████ ███ ██ ████ ███         │
-│  □ statistics   │                                │
-│  □ device_info  ├────────────────────────────────┤
-│                 │  Data Table                    │
-│                 │  ┌──────┬─────┬──────┐        │
-│                 │  │ id   │name │value │        │
-│                 │  ├──────┼─────┼──────┤        │
-│                 │  │ ...  │ ... │ ...  │        │
-└─────────────────┴────────────────────────────────┘
-[q]Quit [↑↓]Navigate [←→]Focus [Tab]Switch [Enter]Select
+# torch (Python)
+# prof.export_chrome_trace("trace.json")
 ```
 
-## 焦点指示
+## Navigation
 
-- 黄色边框: 当前激活的面板
-- 黄色高亮: 当前选中的项目
-- 灰色边框: 非激活面板
+1. Type file path → `Enter` to load
+2. `↑↓` select view, `Tab` switch panel
+3. `s` open statistics, `b` go back
+4. `q` quit
 
-## 使用真实 NSYS 数据
-
-1. 使用 Nsight Systems 进行性能分析:
-   ```bash
-   nsys profile -o myapp ./myapp
-   ```
-
-2. 导出 SQLite 数据库:
-   ```bash
-   nsys export -t sqlite myapp.nsys-rep
-   ```
-
-3. 在 NVIS 中打开导出的 `.sqlite` 文件
-
-## 故障排除
-
-### 数据库打开失败
-- 检查文件路径是否正确
-- 确保文件是有效的 SQLite3 数据库
-- 确保有读取权限
-
-### 无法看到数据
-- 确保表格不为空
-- 尝试使用 `↑/↓` 滚动查看
-- 检查表格是否有数据 (在图表区域会显示行数)
-
-### 终端显示问题
-- 确保终端支持 UTF-8 编码
-- 调整终端窗口大小以获得更好的显示效果
-- 推荐最小终端尺寸: 80x24
-
-## 技术限制
-
-- 每个表格最多显示 1000 行(性能考虑)
-- 柱状图一次最多显示 10 个数据点
-- 单元格内容超过 20 字符会被截断
-- 需要支持 Unicode 的终端
-
-## 更多信息
-
-详细文档请查看 [README.md](README.md)
+Minimum terminal: 80x24, UTF-8 support required.
