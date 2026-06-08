@@ -50,6 +50,11 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
 
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
+                // Clear status message on any key press (except export keys which set new status)
+                if !matches!(key.code, KeyCode::Char('e') | KeyCode::Char('E')) {
+                    app.clear_status();
+                }
+
                 match key.code {
                     KeyCode::Char('q') => {
                         if !app.is_inputting() {
@@ -59,12 +64,34 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                         }
                     }
                     KeyCode::Char('s') => {
-                        // Enter stats page
-                        let _ = app.enter_stats_view();
+                        if !app.is_inputting() {
+                            // Enter stats page
+                            let _ = app.enter_stats_view();
+                        } else {
+                            app.on_char('s');
+                        }
+                    }
+                    KeyCode::Char('e') => {
+                        if !app.is_inputting() {
+                            // Export current table to JSON
+                            let _ = app.export_current_table();
+                        } else {
+                            app.on_char('e');
+                        }
+                    }
+                    KeyCode::Char('E') => {
+                        if !app.is_inputting() {
+                            // Export entire database to JSON
+                            let _ = app.export_database();
+                        }
                     }
                     KeyCode::Char('b') => {
-                        // Back from stats page
-                        app.leave_stats_view();
+                        if !app.is_inputting() {
+                            // Back from stats page
+                            app.leave_stats_view();
+                        } else {
+                            app.on_char('b');
+                        }
                     }
                     KeyCode::Esc => {
                         if !app.is_inputting() {
@@ -91,6 +118,12 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                     KeyCode::End => app.on_end(),
                     KeyCode::Enter => app.on_enter()?,
                     KeyCode::Tab => app.on_tab(),
+                    KeyCode::Char(c) if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                        // Handle Ctrl+C to exit
+                        if c == 'c' {
+                            return Ok(());
+                        }
+                    }
                     KeyCode::Char(c) => app.on_char(c),
                     KeyCode::Backspace => app.on_backspace(),
                     KeyCode::Delete => app.on_delete(),

@@ -2,12 +2,13 @@
 // re-export the public API for ergonomic crate usage.
 pub mod app;
 pub mod db;
+pub mod ncu_csv;
 pub mod ui;
 pub mod visualization;
 pub mod stats;
 
 // Re-exports: prefer `nvis::Thing` over deep module paths
-pub use app::{App, AppState, Focus, TableData};
+pub use app::{App, AppState, Focus, TableData, DbType};
 pub use db::load_table_data_resolved;
 pub use db::{load_table_data, load_tables};
 pub use ui::draw;

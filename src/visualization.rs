@@ -47,6 +47,17 @@ pub fn detect_table_type(table_name: &str, data: &TableData) -> VisualizationTyp
     let table_lower = table_name.to_lowercase();
     let columns_lower: Vec<String> = data.columns.iter().map(|c| c.to_lowercase()).collect();
 
+    // NCU-specific table detection
+    if table_lower == "kernels" {
+        // kernels table from ncu CSV — use BarChart for throughput metrics
+        if columns_lower.iter().any(|c| c.contains("throughput") || c.contains("duration")) {
+            return VisualizationType::BarChart;
+        }
+    }
+    if table_lower == "metrics" || table_lower == "sections" {
+        return VisualizationType::Statistics;
+    }
+
     // 先检查是否是事件/内核表 (优先级高于通用CUDA检查)
     if (table_lower.contains("kernel")
         || table_lower.contains("event")

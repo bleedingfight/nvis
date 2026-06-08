@@ -5,7 +5,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, AppState, Focus};
+use crate::app::{App, AppState, Focus, DbType};
 
 pub fn draw(f: &mut Frame, app: &App) {
     match app.state {
@@ -29,7 +29,7 @@ fn draw_file_selection(f: &mut Frame, app: &App) {
         .split(area);
 
     // Title
-    let title = Paragraph::new("NSYS SQLite Database Viewer")
+    let title = Paragraph::new("NVIDIA Profiler Viewer")
         .style(Style::default().fg(Color::Cyan).bold())
         .alignment(Alignment::Center);
     f.render_widget(title, chunks[0]);
@@ -60,7 +60,7 @@ fn draw_file_selection(f: &mut Frame, app: &App) {
             .style(Style::default().fg(Color::Red))
             .alignment(Alignment::Center)
     } else {
-        Paragraph::new("Enter the path to an NSYS SQLite database file\nPress 'q' or 'Esc' to quit")
+        Paragraph::new("Enter the path to a .sqlite or .csv profiling file\nPress 'q' or 'Esc' to quit")
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center)
     };
@@ -87,6 +87,11 @@ fn draw_table_view(f: &mut Frame, app: &App) {
 
     draw_chart(f, app, right_chunks[0]);
     draw_data_table(f, app, right_chunks[1]);
+
+    // Draw status message if present
+    if let Some(ref msg) = app.status_message {
+        draw_status_message(f, area, msg, Color::Green);
+    }
 
     // Draw help bar at the bottom
     draw_help_bar(f, area);
@@ -527,7 +532,7 @@ fn draw_data_table(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_help_bar(f: &mut Frame, area: Rect) {
     let help_text =
-        " [q]Quit [↑↓]Navigate [←→]Focus [Tab]Switch [Enter]Select [s]Stats [b]Back [Mouse]Click/Scroll ";
+        " [q]Quit [↑↓]Navigate [←→]Focus [Tab]Switch [Enter]Select [s]Stats [b]Back [e]Export [E]ExportAll [Mouse]Click/Scroll ";
     let help = Paragraph::new(help_text)
         .style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .alignment(Alignment::Center);
@@ -542,10 +547,30 @@ fn draw_help_bar(f: &mut Frame, area: Rect) {
     f.render_widget(help, help_area);
 }
 
+fn draw_status_message(f: &mut Frame, area: Rect, message: &str, color: Color) {
+    let msg_area = Rect {
+        x: area.x + 2,
+        y: area.y + area.height - 3,
+        width: area.width.saturating_sub(4),
+        height: 1,
+    };
+
+    let msg = Paragraph::new(message)
+        .style(Style::default().fg(color).bg(Color::Black))
+        .alignment(Alignment::Center);
+
+    f.render_widget(msg, msg_area);
+}
+
 fn draw_stats_view(f: &mut Frame, app: &App) {
     let area = f.area();
 
-    // Vertical split: top chart (box plot), bottom stats table
+    if app.db_type == DbType::Ncu {
+        draw_ncu_stats_view(f, app, area);
+        return;
+    }
+
+    // Original nsys stats view
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
@@ -651,4 +676,207 @@ fn draw_stats_view(f: &mut Frame, app: &App) {
     f.render_widget(table, chunks[1]);
 
     draw_help_bar(f, area);
+}
+
+fn draw_ncu_stats_view(f: &mut Frame, app: &App, area: Rect) {
+    // Vertical split: top bar chart, bottom stats table
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .split(area);
+
+    // Top: grouped bar chart showing SM/Memory/DRAM/Compute throughput per kernel
+    draw_ncu_throughput_chart(f, app, chunks[0]);
+
+    // Bottom: NCU stats table
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Speed of Light Throughput (%)")
+        .border_style(if app.focus == Focus::StatsTable {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        });
+
+    let header = Row::new([
+        Cell::from("ID"),
+        Cell::from("Kernel"),
+        Cell::from("Duration(ns)"),
+        Cell::from("SM(%)"),
+        Cell::from("Mem(%)"),
+        Cell::from("DRAM(%)"),
+        Cell::from("Compute(%)"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
+    .height(1);
+
+    let start = app.stats_scroll;
+    let end = (start + 100).min(app.ncu_stats_rows.len());
+    let rows: Vec<Row> = app.ncu_stats_rows[start..end]
+        .iter()
+        .map(|r| {
+            let kname = crate::ncu_csv::shorten_kernel_name(&r.kernel_name, 28);
+            Row::new([
+                Cell::from(r.kernel_id.clone()),
+                Cell::from(kname),
+                Cell::from(format!("{:.0}", r.duration_ns)),
+                Cell::from(format!("{:.1}", r.sm_throughput_pct)),
+                Cell::from(format!("{:.1}", r.memory_throughput_pct)),
+                Cell::from(format!("{:.1}", r.dram_throughput_pct)),
+                Cell::from(format!("{:.1}", r.compute_throughput_pct)),
+            ])
+            .height(1)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(4),
+        Constraint::Percentage(35),
+        Constraint::Length(12),
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Length(10),
+    ];
+
+    let table = Table::new(rows, &widths)
+        .header(header)
+        .block(block)
+        .column_spacing(1);
+    f.render_widget(table, chunks[1]);
+
+    draw_help_bar(f, area);
+}
+
+fn draw_ncu_throughput_chart(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Speed of Light - Throughput Comparison")
+        .border_style(if app.focus == Focus::Chart {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        });
+
+    if app.ncu_stats_rows.is_empty() {
+        let paragraph = Paragraph::new("No NCU data available").block(block);
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.width < 30 || inner.height < 8 {
+        let paragraph = Paragraph::new("Area too small");
+        f.render_widget(paragraph, inner);
+        return;
+    }
+
+    // Draw a grouped bar chart: each kernel gets 4 bars (SM, Memory, DRAM, Compute)
+    let rows = &app.ncu_stats_rows;
+    let max_kernels = (inner.width / 12) as usize;
+    let display_rows = rows.iter().take(max_kernels.min(rows.len())).collect::<Vec<_>>();
+
+    if display_rows.is_empty() {
+        return;
+    }
+
+    // Layout: left margin for y-axis labels, bottom for x-axis labels
+    let y_label_w = 6u16;
+    let x_label_h = 2u16;
+    let plot_left = inner.x + y_label_w;
+    let plot_top = inner.y + 1;
+    let plot_right = inner.x + inner.width.saturating_sub(1);
+    let plot_bottom = inner.y + inner.height.saturating_sub(1 + x_label_h);
+
+    if plot_right <= plot_left || plot_bottom <= plot_top {
+        return;
+    }
+    let plot_w = plot_right - plot_left;
+    let plot_h = plot_bottom - plot_top;
+
+    // Y axis (0-100%)
+    for yy in plot_top..=plot_bottom {
+        f.render_widget(Paragraph::new("│"), Rect::new(plot_left, yy, 1, 1));
+    }
+
+    // Y axis ticks at 0, 25, 50, 75, 100
+    let ticks = [0u16, 25, 50, 75, 100];
+    for &tick in &ticks {
+        let y = plot_bottom - (tick as f64 / 100.0 * plot_h as f64) as u16;
+        f.render_widget(
+            Paragraph::new("┼").style(Style::default().fg(Color::Gray)),
+            Rect::new(plot_left, y, 1, 1),
+        );
+        f.render_widget(
+            Paragraph::new(format!("{:>4}%", tick)).style(Style::default().fg(Color::Gray)),
+            Rect::new(inner.x + 1, y, y_label_w.saturating_sub(1), 1),
+        );
+        // Horizontal grid line
+        for xx in (plot_left + 1)..plot_right {
+            f.render_widget(
+                Paragraph::new("·").style(Style::default().fg(Color::DarkGray)),
+                Rect::new(xx, y, 1, 1),
+            );
+        }
+    }
+
+    // X axis line
+    for xx in plot_left..=plot_right {
+        f.render_widget(Paragraph::new("─"), Rect::new(xx, plot_bottom, 1, 1));
+    }
+
+    // Draw bars for each kernel
+    let group_width = (plot_w / display_rows.len() as u16).max(10);
+    let bar_width = (group_width.saturating_sub(2)) / 4;
+    let bar_gap = 1u16;
+
+    let colors = [Color::Cyan, Color::Green, Color::Magenta, Color::Yellow];
+    let labels = ["SM", "Mem", "DRAM", "Comp"];
+
+    for (i, row) in display_rows.iter().enumerate() {
+        let group_x = plot_left + (i as u16) * group_width;
+        let values = [
+            row.sm_throughput_pct,
+            row.memory_throughput_pct,
+            row.dram_throughput_pct,
+            row.compute_throughput_pct,
+        ];
+
+        for (j, &val) in values.iter().enumerate() {
+            let bar_x = group_x + 1 + (j as u16) * (bar_width + bar_gap);
+            let bar_height = (val / 100.0 * plot_h as f64) as u16;
+            let bar_top = plot_bottom.saturating_sub(bar_height);
+
+            for yy in bar_top..plot_bottom {
+                let line = "█".repeat(bar_width as usize);
+                f.render_widget(
+                    Paragraph::new(line).style(Style::default().fg(colors[j])),
+                    Rect::new(bar_x, yy, bar_width, 1),
+                );
+            }
+        }
+
+        // Kernel label below x-axis
+        let klabel = crate::ncu_csv::shorten_kernel_name(&row.kernel_name, (group_width - 2) as usize);
+        f.render_widget(
+            Paragraph::new(klabel).alignment(Alignment::Center),
+            Rect::new(group_x, plot_bottom + 1, group_width, 1),
+        );
+    }
+
+    // Legend
+    let mut legend_x = plot_right.saturating_sub(40);
+    for (j, &label) in labels.iter().enumerate() {
+        f.render_widget(
+            Paragraph::new(format!("█{}", label)).style(Style::default().fg(colors[j])),
+            Rect::new(legend_x, inner.y, 8, 1),
+        );
+        legend_x += 9;
+    }
 }

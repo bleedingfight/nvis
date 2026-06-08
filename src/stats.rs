@@ -13,6 +13,17 @@ pub struct CudaApiAggregateRow {
     pub p99_us: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct NcuSpeedOfLightRow {
+    pub kernel_id: String,
+    pub kernel_name: String,
+    pub duration_ns: f64,
+    pub sm_throughput_pct: f64,
+    pub memory_throughput_pct: f64,
+    pub dram_throughput_pct: f64,
+    pub compute_throughput_pct: f64,
+}
+
 /// Compute CUDA API aggregates similar to `nsys stats --report cuda_api_sum`.
 /// Joins CUPTI_ACTIVITY_KIND_RUNTIME with StringIds to resolve names, then aggregates.
 pub fn compute_cuda_api_aggregates(
@@ -79,6 +90,38 @@ pub fn compute_cuda_api_aggregates(
             p50_us: row.get::<_, f64>(4)?,
             p95_us: row.get::<_, f64>(5)?,
             p99_us: row.get::<_, f64>(6)?,
+        })
+    })?;
+
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// Compute NCU Speed of Light throughput comparison across kernels.
+/// Queries the kernels table for key throughput metrics.
+pub fn compute_ncu_speed_of_light(conn: &Connection) -> Result<Vec<NcuSpeedOfLightRow>> {
+    let sql = r#"
+        SELECT
+            "ID",
+            "Kernel_Name",
+            COALESCE("Duration_ns", 0),
+            COALESCE("Compute_SM_Throughput_pct", 0),
+            COALESCE("Memory_Throughput_pct", 0),
+            COALESCE("DRAM_Throughput_pct", 0),
+            COALESCE("Compute_SM_Throughput_pct", 0)
+        FROM kernels
+        ORDER BY "Duration_ns" DESC
+    "#;
+
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(NcuSpeedOfLightRow {
+            kernel_id: row.get::<_, String>(0)?,
+            kernel_name: row.get::<_, String>(1)?,
+            duration_ns: row.get::<_, f64>(2)?,
+            sm_throughput_pct: row.get::<_, f64>(3)?,
+            memory_throughput_pct: row.get::<_, f64>(4)?,
+            dram_throughput_pct: row.get::<_, f64>(5)?,
+            compute_throughput_pct: row.get::<_, f64>(6)?,
         })
     })?;
 
