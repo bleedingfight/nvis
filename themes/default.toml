@@ -1,0 +1,48 @@
+# nvis default theme — matches original hardcoded colors
+
+[ui]
+border_focus = "Yellow"
+border_unfocus = ""
+header_fg = "Yellow"
+header_modifier = "bold"
+col_highlight_bg = "#005050"
+col_highlight_fg = "White"
+row_highlight_bg = "DarkGray"
+row_highlight_fg = "White"
+list_highlight_bg = "DarkGray"
+sql_error_border = "Red"
+title_fg = "Cyan"
+help_bar_bg = "DarkGray"
+help_bar_fg = "White"
+error_fg = "Red"
+hint_fg = "Gray"
+
+[timeline]
+lane_bg_even = "#1e1e2a"
+lane_bg_odd = "#262632"
+selection_bg = "#3c3c50"
+lane_label_fg = "DarkGray"
+time_axis_fg = "Gray"
+kernel_colors = ["Cyan", "Green", "Blue", "Red", "Magenta", "Yellow", "#ffa500", "#00ced1"]
+memcpy_color = "Magenta"
+memset_color = "Yellow"
+event_fallback = "White"
+hover_text_bg = "White"
+hover_text_fg = "Black"
+selected_text_bg = "#3c3c50"
+info_bar_bg = "DarkGray"
+info_bar_fg = "White"
+
+[boxplot]
+whisker_fg = "Green"
+box_fg = "Green"
+median_fg = "Yellow"
+axis_fg = "Gray"
+
+[barchart]
+bar_fg = "Green"
+bar_value_fg = "Black"
+bar_value_bg = "Green"
+
+[statistics]
+text_fg = "White"

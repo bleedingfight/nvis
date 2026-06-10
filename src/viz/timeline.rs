@@ -57,19 +57,12 @@ pub fn lane_to_row(lane_idx: usize, plot_y: u16) -> u16 {
     plot_y + (lane_idx as u16) * LANE_HEIGHT_ROWS
 }
 
-pub fn kernel_color(name: &str) -> Color {
-    let palette = [
-        Color::Cyan,
-        Color::Green,
-        Color::Blue,
-        Color::Red,
-        Color::Magenta,
-        Color::Yellow,
-        Color::Rgb(255, 165, 0),
-        Color::Rgb(0, 206, 209),
-    ];
+pub fn kernel_color(name: &str, kernel_colors: &[Color]) -> Color {
+    if kernel_colors.is_empty() {
+        return Color::Cyan;
+    }
     let hash = name.chars().fold(0u32, |acc, c| acc.wrapping_add(c as u32));
-    palette[hash as usize % palette.len()]
+    kernel_colors[hash as usize % kernel_colors.len()]
 }
 
 // --- Data generation ---
@@ -252,10 +245,29 @@ impl VizRenderer for TimelineRenderer {
         })
     }
 
-    fn draw(&self, f: &mut Frame, area: Rect, viz: &PreparedVisualization, focused: bool) {
+    fn draw(&self, f: &mut Frame, area: Rect, viz: &PreparedVisualization, focused: bool, theme: &crate::theme::Theme) {
         let VizData::Timeline(ref prepared) = viz.data else {
             return;
         };
+
+        // Extract theme colors
+        let border_focus = crate::theme::parse_color(&theme.ui.border_focus);
+        let border_unfocus = crate::theme::parse_color(&theme.ui.border_unfocus);
+        let kc: Vec<Color> = theme.timeline.kernel_colors.iter().filter_map(|s| crate::theme::parse_color(s)).collect();
+        let mc = crate::theme::parse_color(&theme.timeline.memcpy_color).unwrap_or(Color::Magenta);
+        let ms = crate::theme::parse_color(&theme.timeline.memset_color).unwrap_or(Color::Yellow);
+        let ev_fb = crate::theme::parse_color(&theme.timeline.event_fallback).unwrap_or(Color::White);
+        let ht_bg = crate::theme::parse_color(&theme.timeline.hover_text_bg).unwrap_or(Color::White);
+        let ht_fg = crate::theme::parse_color(&theme.timeline.hover_text_fg).unwrap_or(Color::Black);
+        let st_bg = crate::theme::parse_color(&theme.timeline.selected_text_bg).unwrap_or(Color::Rgb(60, 60, 80));
+        let sel_bg = crate::theme::parse_color(&theme.timeline.selection_bg).unwrap_or(Color::Rgb(60, 60, 80));
+        let ib_bg = crate::theme::parse_color(&theme.timeline.info_bar_bg).unwrap_or(Color::DarkGray);
+        let ib_fg = crate::theme::parse_color(&theme.timeline.info_bar_fg).unwrap_or(Color::White);
+        let label_fg = crate::theme::parse_color(&theme.timeline.lane_label_fg).unwrap_or(Color::DarkGray);
+        let time_fg = crate::theme::parse_color(&theme.timeline.time_axis_fg).unwrap_or(Color::Gray);
+        let lane_even = crate::theme::parse_color(&theme.timeline.lane_bg_even).unwrap_or(Color::Rgb(30, 30, 42));
+        let lane_odd = crate::theme::parse_color(&theme.timeline.lane_bg_odd).unwrap_or(Color::Rgb(38, 38, 50));
+        let sep_fg = label_fg;
 
         let default_viewport = TimelineViewport {
             view_start_ns: prepared.global_start_ns,
@@ -274,9 +286,9 @@ impl VizRenderer for TimelineRenderer {
             .borders(Borders::ALL)
             .title(viz.title.as_str())
             .border_style(if focused {
-                Style::default().fg(Color::Yellow)
+                border_focus.map_or(Style::default(), |c| Style::default().fg(c))
             } else {
-                Style::default()
+                border_unfocus.map_or(Style::default(), |c| Style::default().fg(c))
             });
 
         let inner = block.inner(area);
@@ -307,7 +319,7 @@ impl VizRenderer for TimelineRenderer {
             let label = format!(" S{:>5}", stream_id);
             let y = inner.y + TIME_AXIS_ROWS + (i as u16) * LANE_HEIGHT_ROWS;
             f.render_widget(
-                Paragraph::new(label).style(Style::default().fg(Color::DarkGray)),
+                Paragraph::new(label).style(Style::default().fg(label_fg)),
                 Rect::new(inner.x, y, LANE_LABEL_COLS, LANE_HEIGHT_ROWS),
             );
         }
@@ -322,7 +334,7 @@ impl VizRenderer for TimelineRenderer {
                 let x = pa.x + col as u16;
                 let label = format_duration(offset_ns);
                 f.render_widget(
-                    Paragraph::new(label.clone()).style(Style::default().fg(Color::Gray)),
+                    Paragraph::new(label.clone()).style(Style::default().fg(time_fg)),
                     Rect::new(
                         x.saturating_sub((label.len() / 2) as u16),
                         inner.y,
@@ -331,7 +343,7 @@ impl VizRenderer for TimelineRenderer {
                     ),
                 );
                 f.render_widget(
-                    Paragraph::new("|").style(Style::default().fg(Color::DarkGray)),
+                    Paragraph::new("|").style(Style::default().fg(sep_fg)),
                     Rect::new(x, inner.y + 1, 1, 1),
                 );
             }
@@ -344,13 +356,7 @@ impl VizRenderer for TimelineRenderer {
 
         // Lane background colors for visual distinction
         let lane_bg_colors: Vec<Color> = (0..num_lanes)
-            .map(|i| {
-                if i % 2 == 0 {
-                    Color::Rgb(30, 30, 42)
-                } else {
-                    Color::Rgb(38, 38, 50)
-                }
-            })
+            .map(|i| if i % 2 == 0 { lane_even } else { lane_odd })
             .collect();
 
         // Pre-compute visible events and their column positions
@@ -400,10 +406,10 @@ impl VizRenderer for TimelineRenderer {
             let clipped_width = width_cols.min(plot_w - start_col);
 
             let color = match event.event_type {
-                TimelineEventType::Kernel => kernel_color(&event.name),
-                TimelineEventType::Memcpy => Color::Magenta,
-                TimelineEventType::Memset => Color::Yellow,
-                _ => Color::White,
+                TimelineEventType::Kernel => kernel_color(&event.name, &kc),
+                TimelineEventType::Memcpy => mc,
+                TimelineEventType::Memset => ms,
+                _ => ev_fb,
             };
 
             let is_hovered = viewport.hovered == Some(idx);
@@ -423,7 +429,7 @@ impl VizRenderer for TimelineRenderer {
             lane_events[lane_y].push(EventDraw {
                 start_col,
                 width_cols: clipped_width,
-                color: if is_hovered { Color::White } else { color },
+                color: if is_hovered { ht_bg } else { color },
                 label,
                 is_hovered,
                 is_selected,
@@ -461,7 +467,7 @@ impl VizRenderer for TimelineRenderer {
                     let lane_bg = lane_bg_colors[lane_idx];
                     let gap_bg = if let Some((sc, ec)) = sel_cols {
                         if col < ec && event.start_col > sc {
-                            Color::Rgb(60, 60, 80)
+                            sel_bg
                         } else {
                             lane_bg
                         }
@@ -470,13 +476,12 @@ impl VizRenderer for TimelineRenderer {
                     };
                     spans_top.push(Span::styled(" ".repeat(gap_len), Style::default().bg(gap_bg)));
                     spans_bot.push(Span::styled(" ".repeat(gap_len), Style::default().bg(gap_bg)));
-                    col = event.start_col; // advances col past the gap; overwritten after event draw
                 }
 
                 // Draw event block
                 let event_style = Style::default().fg(event.color);
                 let event_style_bg = if event.is_selected {
-                    Style::default().fg(event.color).bg(Color::Rgb(60, 60, 80))
+                    Style::default().fg(event.color).bg(sel_bg)
                 } else {
                     event_style
                 };
@@ -484,11 +489,11 @@ impl VizRenderer for TimelineRenderer {
                 if let Some(ref label) = event.label {
                     // Wide enough to show text: render as colored text on colored bg
                     let text_style = if event.is_hovered {
-                        Style::default().fg(Color::Black).bg(Color::White)
+                        Style::default().fg(ht_fg).bg(ht_bg)
                     } else if event.is_selected {
-                        Style::default().fg(Color::White).bg(Color::Rgb(60, 60, 80))
+                        Style::default().fg(ib_fg).bg(st_bg)
                     } else {
-                        Style::default().fg(Color::Black).bg(event.color)
+                        Style::default().fg(ht_fg).bg(event.color)
                     };
                     let padded = format!(" {} ", label);
                     let text = if padded.len() > event.width_cols {
@@ -539,7 +544,7 @@ impl VizRenderer for TimelineRenderer {
             if sep_y < pa.y + pa.height && lane_idx + 1 < num_lanes {
                 let sep_line: Line = vec![Span::styled(
                     "─".repeat(plot_w),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(sep_fg),
                 )]
                 .into();
                 f.render_widget(
@@ -571,7 +576,7 @@ impl VizRenderer for TimelineRenderer {
                 };
                 f.render_widget(
                     Paragraph::new(format!(" {} ", tooltip_text))
-                        .style(Style::default().fg(Color::White).bg(Color::DarkGray)),
+                        .style(Style::default().fg(ht_fg).bg(ib_bg)),
                     tooltip_area,
                 );
             }
@@ -610,28 +615,28 @@ impl VizRenderer for TimelineRenderer {
                     continue;
                 }
                 if shown > 0 {
-                    info_spans.push(Span::styled(" ", Style::default().fg(Color::Yellow).bg(Color::DarkGray)));
+                    info_spans.push(Span::styled(" ", Style::default().fg(ib_fg).bg(ib_bg)));
                 }
                 shown += 1;
                 let e = &prepared.events[idx];
                 let color = match e.event_type {
-                    TimelineEventType::Kernel => kernel_color(&e.name),
-                    TimelineEventType::Memcpy => Color::Magenta,
-                    TimelineEventType::Memset => Color::Yellow,
-                    _ => Color::White,
+                    TimelineEventType::Kernel => kernel_color(&e.name, &kc),
+                    TimelineEventType::Memcpy => mc,
+                    TimelineEventType::Memset => ms,
+                    _ => ev_fb,
                 };
                 let name = crate::core::types::truncate_str(&e.name, 15);
                 let dur = format_duration(e.duration);
                 info_spans.push(Span::styled(
                     format!(" {} {} ", name, dur),
-                    Style::default().fg(Color::Black).bg(color),
+                    Style::default().fg(ht_fg).bg(color),
                 ));
             }
 
             if overflow > 0 {
                 info_spans.push(Span::styled(
                     format!(" +{}more ", overflow),
-                    Style::default().fg(Color::Yellow).bg(Color::DarkGray),
+                    Style::default().fg(ib_fg).bg(ib_bg)
                 ));
             }
 
@@ -639,22 +644,22 @@ impl VizRenderer for TimelineRenderer {
                 if let Some(hi) = viewport.hovered {
                     if let Some(e) = prepared.events.get(hi) {
                         let color = match e.event_type {
-                            TimelineEventType::Kernel => kernel_color(&e.name),
-                            TimelineEventType::Memcpy => Color::Magenta,
-                            TimelineEventType::Memset => Color::Yellow,
-                            _ => Color::White,
+                            TimelineEventType::Kernel => kernel_color(&e.name, &kc),
+                            TimelineEventType::Memcpy => mc,
+                            TimelineEventType::Memset => ms,
+                            _ => ev_fb,
                         };
                         let name = crate::core::types::truncate_str(&e.name, 30);
                         let dur = format_duration(e.duration);
                         info_spans.push(Span::styled(
                             format!(" {} {} ", name, dur),
-                            Style::default().fg(Color::Black).bg(color),
+                            Style::default().fg(ht_fg).bg(color),
                         ));
                     }
                 } else if let Some((s, e)) = viewport.selection {
                     let us = (e - s) / 1000.0;
                     let txt = if us >= 1000.0 { format!("Selected: {:.1}ms", us / 1000.0) } else { format!("Selected: {:.1}us", us) };
-                    info_spans.push(Span::styled(txt, Style::default().fg(Color::Yellow).bg(Color::DarkGray)));
+                    info_spans.push(Span::styled(txt, Style::default().fg(ib_fg).bg(ib_bg)));
                 }
             }
 

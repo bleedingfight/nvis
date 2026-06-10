@@ -50,14 +50,14 @@ fn generate_bar_chart_data(data: &ProfilerData, scroll: usize) -> Vec<(String, f
     }
 }
 
-fn draw_bar_chart(f: &mut Frame, area: Rect, title: &str, labels: &[String], values: &[f64], focused: bool) {
+fn draw_bar_chart(f: &mut Frame, area: Rect, title: &str, labels: &[String], values: &[f64], focused: bool, theme: &crate::theme::Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
         .border_style(if focused {
-            Style::default().fg(Color::Yellow)
+            crate::theme::parse_color(&theme.ui.border_focus).map_or(Style::default(), |c| Style::default().fg(c))
         } else {
-            Style::default()
+            crate::theme::parse_color(&theme.ui.border_unfocus).map_or(Style::default(), |c| Style::default().fg(c))
         });
 
     if values.is_empty() {
@@ -72,12 +72,16 @@ fn draw_bar_chart(f: &mut Frame, area: Rect, title: &str, labels: &[String], val
         .map(|(l, v)| (l.as_str(), *v as u64))
         .collect();
 
+    let bar_fg = crate::theme::parse_color(&theme.barchart.bar_fg).unwrap_or(Color::Green);
+    let val_fg = crate::theme::parse_color(&theme.barchart.bar_value_fg).unwrap_or(Color::White);
+    let val_bg = crate::theme::parse_color(&theme.barchart.bar_value_bg).unwrap_or(Color::Green);
+
     let barchart = BarChart::default()
         .block(block)
         .bar_width(5)
         .bar_gap(1)
-        .bar_style(Style::default().fg(Color::Green))
-        .value_style(Style::default().fg(Color::White).bg(Color::Green))
+        .bar_style(Style::default().fg(bar_fg))
+        .value_style(Style::default().fg(val_fg).bg(val_bg))
         .data(&data);
 
     f.render_widget(barchart, area);
@@ -107,9 +111,9 @@ impl VizRenderer for BarChartRenderer {
         })
     }
 
-    fn draw(&self, f: &mut Frame, area: Rect, viz: &PreparedVisualization, focused: bool) {
+    fn draw(&self, f: &mut Frame, area: Rect, viz: &PreparedVisualization, focused: bool, theme: &crate::theme::Theme) {
         if let VizData::Bars { labels, values } = &viz.data {
-            draw_bar_chart(f, area, &viz.title, labels, values, focused);
+            draw_bar_chart(f, area, &viz.title, labels, values, focused, theme);
         }
     }
 }

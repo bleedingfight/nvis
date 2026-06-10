@@ -151,14 +151,17 @@ fn draw_boxplot_chart(
     title: &str,
     boxplots: &[BoxPlotData],
     focused: bool,
+    theme: &crate::theme::Theme,
 ) {
+    let border_focus = crate::theme::parse_color(&theme.ui.border_focus);
+    let border_unfocus = crate::theme::parse_color(&theme.ui.border_unfocus);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
         .border_style(if focused {
-            Style::default().fg(Color::Yellow)
+            border_focus.map_or(Style::default(), |c| Style::default().fg(c))
         } else {
-            Style::default()
+            border_unfocus.map_or(Style::default(), |c| Style::default().fg(c))
         });
 
     if boxplots.is_empty() {
@@ -166,6 +169,11 @@ fn draw_boxplot_chart(
         f.render_widget(paragraph, area);
         return;
     }
+
+    let axis_fg = crate::theme::parse_color(&theme.boxplot.axis_fg).unwrap_or(Color::Gray);
+    let whisker_fg = crate::theme::parse_color(&theme.boxplot.whisker_fg).unwrap_or(Color::Green);
+    let box_fg_val = crate::theme::parse_color(&theme.boxplot.box_fg).unwrap_or(Color::Green);
+    let median_fg = crate::theme::parse_color(&theme.boxplot.median_fg).unwrap_or(Color::Yellow);
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -233,12 +241,12 @@ fn draw_boxplot_chart(
         );
         let label = format!("{:>width$}", fmt(t), width = (y_axis_w - 2) as usize);
         f.render_widget(
-            Paragraph::new(label).style(Style::default().fg(Color::Gray)),
+            Paragraph::new(label).style(Style::default().fg(axis_fg)),
             Rect::new(inner.x + 1, y, y_axis_w.saturating_sub(2), 1),
         );
     }
     f.render_widget(
-        Paragraph::new("耗时 (ns)").style(Style::default().fg(Color::Gray)),
+        Paragraph::new("耗时 (ns)").style(Style::default().fg(axis_fg)),
         Rect::new(
             inner.x + 1,
             plot_top.saturating_sub(1),
@@ -268,11 +276,11 @@ fn draw_boxplot_chart(
 
         let top_line = "─".repeat(box_w as usize);
         f.render_widget(
-            Paragraph::new(top_line.clone()).style(Style::default().fg(Color::Green)),
+            Paragraph::new(top_line.clone()).style(Style::default().fg(whisker_fg)),
             Rect::new(left, max_y, box_w, 1),
         );
         f.render_widget(
-            Paragraph::new(top_line).style(Style::default().fg(Color::Green)),
+            Paragraph::new(top_line).style(Style::default().fg(whisker_fg)),
             Rect::new(left, min_y, box_w, 1),
         );
         for yy in (top_y + 1)..max_y {
@@ -292,14 +300,14 @@ fn draw_boxplot_chart(
                 format!("│{}│", " ".repeat((box_w - 2) as usize))
             };
             f.render_widget(
-                Paragraph::new(line).style(Style::default().fg(Color::Green)),
+                Paragraph::new(line).style(Style::default().fg(box_fg_val)),
                 Rect::new(left, yy, box_w, 1),
             );
         }
         let med_len = (box_w - 2).max(1);
         f.render_widget(
             Paragraph::new("─".repeat(med_len as usize))
-                .style(Style::default().fg(Color::Yellow)),
+                .style(Style::default().fg(median_fg)),
             Rect::new(left + 1, med_y, med_len, 1),
         );
 
@@ -352,9 +360,9 @@ impl VizRenderer for BoxPlotRenderer {
         })
     }
 
-    fn draw(&self, f: &mut Frame, area: Rect, viz: &PreparedVisualization, focused: bool) {
+    fn draw(&self, f: &mut Frame, area: Rect, viz: &PreparedVisualization, focused: bool, theme: &crate::theme::Theme) {
         if let VizData::BoxPlots(ref boxplots) = &viz.data {
-            draw_boxplot_chart(f, area, &viz.title, boxplots, focused);
+            draw_boxplot_chart(f, area, &viz.title, boxplots, focused, theme);
         }
     }
 }

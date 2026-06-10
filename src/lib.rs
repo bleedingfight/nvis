@@ -6,6 +6,7 @@ pub mod ui;
 pub mod visualization;
 pub mod stats;
 pub mod backends;
+pub mod theme;
 
 pub use app::{App, AppState, Focus};
 pub use ui::draw;

@@ -1,12 +1,15 @@
 use anyhow::Result;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tui_input::Input;
 
 use crate::core::backend::ProfilerBackend;
 use crate::core::registry::Registry;
 use crate::core::session::ProfilerSession;
 use crate::core::types::{ProfilerData, ViewCategory, ViewDescriptor};
+use crate::theme::Theme;
 use crate::viz::renderer::VizRenderer;
 use crate::viz::types::{PreparedVisualization, TimelineViewport, VizData};
 use crate::viz::timeline;
@@ -40,6 +43,10 @@ pub struct App {
     pub backend: Option<Arc<dyn ProfilerBackend>>,
     pub session: Option<Box<dyn ProfilerSession>>,
 
+    // Theme
+    pub theme: Theme,
+    pub theme_name: String,
+
     // View navigation
     pub views: Vec<ViewDescriptor>,
     pub selected_view_index: usize,
@@ -47,6 +54,7 @@ pub struct App {
 
     // UI scroll state
     pub table_scroll: usize,
+    pub table_hscroll: usize,
     pub chart_scroll: usize,
 
     // Stats sub-view
@@ -56,15 +64,28 @@ pub struct App {
     // Cached rendering
     pub prepared_viz: Option<PreparedVisualization>,
     pub active_renderer: Option<Arc<dyn VizRenderer>>,
+    pub cached_display_data: Option<ProfilerData>,
 
     // Timeline interactive state
     pub timeline_viewport: Option<TimelineViewport>,
 
     // SQL console state
+    pub sql_mode: bool,
     pub sql_input: Input,
     pub sql_result: Option<ProfilerData>,
-    pub sql_scroll: usize,
     pub sql_error: Option<String>,
+
+    // Fullscreen state
+    pub fullscreen: Option<Focus>,
+
+    // Help bar visibility
+    pub help_bar_visible: bool,
+
+    // Table interactive state
+    pub hidden_col_names: HashSet<String>,
+    pub col_highlight: Option<String>,
+    pub row_highlight: Option<usize>,
+    pub last_click_at: Option<(u16, u16, Instant)>,
 }
 
 fn prepared_stream_count(viz: &Option<PreparedVisualization>) -> usize {
@@ -86,20 +107,30 @@ impl App {
             registry,
             backend: None,
             session: None,
+            theme: Theme::default(),
+            theme_name: "default".to_string(),
             views: Vec::new(),
             selected_view_index: 0,
             view_data: None,
             table_scroll: 0,
+            table_hscroll: 0,
             chart_scroll: 0,
             stats_data: None,
             stats_scroll: 0,
             prepared_viz: None,
             active_renderer: None,
+            cached_display_data: None,
             timeline_viewport: None,
+            sql_mode: false,
             sql_input: Input::default(),
             sql_result: None,
-            sql_scroll: 0,
             sql_error: None,
+            fullscreen: None,
+            help_bar_visible: true,
+            hidden_col_names: HashSet::new(),
+            col_highlight: None,
+            row_highlight: None,
+            last_click_at: None,
         }
     }
 
@@ -155,10 +186,81 @@ impl App {
         self.state == AppState::ViewBrowser && self.focus == Focus::SqlInput
     }
 
-    fn current_view_is_timeline(&self) -> bool {
+    pub fn current_view_is_timeline(&self) -> bool {
         self.views
             .get(self.selected_view_index)
             .map_or(false, |v| v.category == ViewCategory::Timeline)
+    }
+
+    fn current_view_is_metadata(&self) -> bool {
+        self.views
+            .get(self.selected_view_index)
+            .map_or(false, |v| v.category == ViewCategory::Metadata)
+    }
+
+    pub fn open_sql_mode(&mut self) {
+        self.sql_mode = true;
+        self.focus = Focus::SqlInput;
+        self.invalidate_display_cache();
+    }
+
+    pub fn close_sql_mode(&mut self) {
+        self.sql_mode = false;
+        self.sql_result = None;
+        self.sql_error = None;
+        self.table_scroll = 0;
+        self.table_hscroll = 0;
+        self.focus = Focus::ViewList;
+        self.invalidate_display_cache();
+    }
+
+    pub fn toggle_fullscreen(&mut self) {
+        if self.fullscreen.is_some() {
+            self.fullscreen = None;
+        } else if self.state == AppState::ViewBrowser {
+            match self.focus {
+                Focus::ViewList | Focus::Chart | Focus::DataTable | Focus::SqlInput => {
+                    self.fullscreen = Some(self.focus.clone());
+                }
+                _ => {}
+            }
+        } else if self.state == AppState::StatsView {
+            match self.focus {
+                Focus::Chart | Focus::StatsTable => {
+                    self.fullscreen = Some(self.focus.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub fn display_data(&self) -> Option<&ProfilerData> {
+        if self.cached_display_data.is_some() {
+            return self.cached_display_data.as_ref();
+        }
+        None // caller should call ensure_display_cache first
+    }
+
+    pub fn ensure_display_cache(&mut self) {
+        if self.cached_display_data.is_some() {
+            return;
+        }
+        let raw = if self.sql_mode {
+            self.sql_result.as_ref().or(self.view_data.as_ref())
+        } else {
+            self.view_data.as_ref()
+        };
+        if let Some(d) = raw {
+            self.cached_display_data = Some(
+                d.without_all_null_columns()
+                 .without_redundant_name_columns()
+                 .with_merged_grid_block()
+            );
+        }
+    }
+
+    pub fn invalidate_display_cache(&mut self) {
+        self.cached_display_data = None;
     }
 
     pub fn execute_current_sql(&mut self) {
@@ -171,11 +273,11 @@ impl App {
                 Ok(data) => {
                     self.sql_result = Some(data);
                     self.sql_error = None;
-                    self.sql_scroll = 0;
+                    self.table_scroll = 0;
+                    self.invalidate_display_cache();
                 }
                 Err(e) => {
                     self.sql_error = Some(format!("{}", e));
-                    self.sql_result = None;
                 }
             }
         }
@@ -184,15 +286,20 @@ impl App {
     pub fn on_up(&mut self) {
         match self.focus {
             Focus::ViewList => {
+                if self.views.is_empty() { return; }
                 if self.selected_view_index > 0 {
                     self.selected_view_index -= 1;
-                    let _ = self.load_view_data();
+                } else {
+                    self.selected_view_index = self.views.len() - 1;
+                }
+                let _ = self.load_view_data();
+            }
+            Focus::DataTable => {
+                if let Some(data) = self.cached_display_data.as_ref() {
+                    if data.row_count == 0 { return; }
+                    self.table_scroll = if self.table_scroll > 0 { self.table_scroll - 1 } else { data.row_count - 1 };
                 }
             }
-            Focus::DataTable
-                if self.table_scroll > 0 => {
-                    self.table_scroll -= 1;
-                }
             _ => {}
         }
     }
@@ -200,16 +307,18 @@ impl App {
     pub fn on_down(&mut self) {
         match self.focus {
             Focus::ViewList => {
+                if self.views.is_empty() { return; }
                 if self.selected_view_index + 1 < self.views.len() {
                     self.selected_view_index += 1;
-                    let _ = self.load_view_data();
+                } else {
+                    self.selected_view_index = 0;
                 }
+                let _ = self.load_view_data();
             }
             Focus::DataTable => {
-                if let Some(ref data) = self.view_data {
-                    if self.table_scroll + 1 < data.row_count {
-                        self.table_scroll += 1;
-                    }
+                if let Some(data) = self.cached_display_data.as_ref() {
+                    if data.row_count == 0 { return; }
+                    self.table_scroll = if self.table_scroll + 1 < data.row_count { self.table_scroll + 1 } else { 0 };
                 }
             }
             _ => {}
@@ -224,27 +333,52 @@ impl App {
 
     pub fn on_right(&mut self) {
         if self.state == AppState::ViewBrowser && !self.views.is_empty() {
-            self.focus = Focus::DataTable;
+            if self.current_view_is_metadata() {
+                self.focus = Focus::DataTable;
+            } else {
+                self.focus = Focus::DataTable;
+            }
         }
     }
 
+    pub fn on_table_hscroll_left(&mut self) {
+        self.table_hscroll = self.table_hscroll.saturating_sub(4);
+    }
+
+    pub fn on_table_hscroll_right(&mut self) {
+        self.table_hscroll = self.table_hscroll.saturating_add(4);
+    }
+
     pub fn on_tab(&mut self) {
+        // Tab always exits fullscreen first
+        if self.fullscreen.is_some() {
+            self.fullscreen = None;
+            return;
+        }
         if self.state == AppState::ViewBrowser {
-            if self.current_view_is_timeline() {
+            if self.sql_mode {
                 self.focus = match self.focus {
-                    Focus::ViewList => Focus::Chart,
-                    Focus::Chart => Focus::SqlInput,
-                    Focus::SqlInput => Focus::SqlResult,
-                    Focus::SqlResult => Focus::ViewList,
-                    _ => Focus::ViewList,
-                };
-            } else {
-                self.focus = match self.focus {
-                    Focus::ViewList => Focus::Chart,
-                    Focus::Chart => Focus::DataTable,
+                    Focus::ViewList => Focus::SqlInput,
+                    Focus::SqlInput => Focus::DataTable,
                     Focus::DataTable => Focus::ViewList,
                     _ => Focus::ViewList,
                 };
+            } else {
+                let is_metadata = self.current_view_is_metadata();
+                if is_metadata {
+                    self.focus = match self.focus {
+                        Focus::ViewList => Focus::DataTable,
+                        Focus::DataTable => Focus::ViewList,
+                        _ => Focus::ViewList,
+                    };
+                } else {
+                    self.focus = match self.focus {
+                        Focus::ViewList => Focus::Chart,
+                        Focus::Chart => Focus::DataTable,
+                        Focus::DataTable => Focus::ViewList,
+                        _ => Focus::ViewList,
+                    };
+                }
             }
         } else if self.state == AppState::StatsView {
             self.focus = match self.focus {
@@ -373,6 +507,48 @@ impl App {
         }
     }
 
+    pub fn on_hide_col(&mut self) {
+        if let Some(ref name) = self.col_highlight.take() {
+            self.hidden_col_names.insert(name.clone());
+            self.invalidate_display_cache();
+        }
+    }
+
+    pub fn on_unhide_all_cols(&mut self) {
+        self.hidden_col_names.clear();
+        self.invalidate_display_cache();
+        self.col_highlight = None;
+    }
+
+    pub fn cycle_theme(&mut self) {
+        let themes = crate::theme::discover_themes();
+        if themes.is_empty() {
+            return;
+        }
+        let current_idx = themes.iter().position(|t| t == &self.theme_name).unwrap_or(0);
+        let next_idx = (current_idx + 1) % themes.len();
+        let next_name = themes[next_idx].clone();
+        match crate::theme::load_theme(&next_name) {
+            Ok(t) => {
+                self.theme = t;
+                self.theme_name = next_name;
+            }
+            Err(_) => {}
+        }
+    }
+
+    pub fn on_paste(&mut self, text: &str) {
+        if self.is_inputting() {
+            for c in text.chars() {
+                self.file_input.handle(tui_input::InputRequest::InsertChar(c));
+            }
+        } else if self.is_sql_inputting() {
+            for c in text.chars() {
+                self.sql_input.handle(tui_input::InputRequest::InsertChar(c));
+            }
+        }
+    }
+
     pub fn on_home(&mut self) {
         if self.state == AppState::FileSelection && self.focus == Focus::FileInput {
             self.file_input.handle(tui_input::InputRequest::GoToStart);
@@ -389,10 +565,9 @@ impl App {
         match self.focus {
             Focus::ViewList => self.on_down(),
             Focus::DataTable => {
-                if let Some(ref data) = self.view_data {
-                    if self.table_scroll + 1 < data.row_count {
-                        self.table_scroll += 1;
-                    }
+                if let Some(data) = self.cached_display_data.as_ref() {
+                    if data.row_count == 0 { return; }
+                    self.table_scroll = if self.table_scroll + 1 < data.row_count { self.table_scroll + 1 } else { 0 };
                 }
             }
             Focus::Chart => {
@@ -401,16 +576,8 @@ impl App {
             }
             Focus::StatsTable => {
                 if let Some(ref data) = self.stats_data {
-                    if self.stats_scroll + 1 < data.row_count {
-                        self.stats_scroll += 1;
-                    }
-                }
-            }
-            Focus::SqlResult => {
-                if let Some(ref data) = self.sql_result {
-                    if self.sql_scroll + 1 < data.row_count {
-                        self.sql_scroll += 1;
-                    }
+                    if data.row_count == 0 { return; }
+                    self.stats_scroll = if self.stats_scroll + 1 < data.row_count { self.stats_scroll + 1 } else { 0 };
                 }
             }
             _ => {}
@@ -421,58 +588,54 @@ impl App {
         match self.focus {
             Focus::ViewList => self.on_up(),
             Focus::DataTable => {
-                if self.table_scroll > 0 {
-                    self.table_scroll -= 1;
+                if let Some(data) = self.cached_display_data.as_ref() {
+                    if data.row_count == 0 { return; }
+                    self.table_scroll = if self.table_scroll > 0 { self.table_scroll - 1 } else { data.row_count - 1 };
                 }
             }
             Focus::Chart => {
                 self.chart_scroll = self.chart_scroll.saturating_sub(1);
                 self.refresh_visualization();
             }
-            Focus::StatsTable
-                if self.stats_scroll > 0 => {
-                    self.stats_scroll -= 1;
+            Focus::StatsTable => {
+                if let Some(ref data) = self.stats_data {
+                    if data.row_count == 0 { return; }
+                    self.stats_scroll = if self.stats_scroll > 0 { self.stats_scroll - 1 } else { data.row_count - 1 };
                 }
-            Focus::SqlResult
-                if self.sql_scroll > 0 => {
-                    self.sql_scroll -= 1;
-                }
+            }
             _ => {}
         }
     }
 
     pub fn on_mouse_click(&mut self, x: u16, y: u16, area: ratatui::layout::Rect) -> Result<()> {
         if self.state == AppState::ViewBrowser {
-            let main_chunks = ratatui::layout::Layout::default()
-                .direction(ratatui::layout::Direction::Horizontal)
-                .constraints([
-                    ratatui::layout::Constraint::Percentage(25),
-                    ratatui::layout::Constraint::Percentage(75),
-                ])
-                .split(area);
+            let is_tl = self.current_view_is_timeline();
+            let is_md = self.current_view_is_metadata();
+            let (left, _, right_chunks) = crate::ui::layout_chunks(area, is_tl, is_md, self.sql_mode);
 
-            if x < main_chunks[0].x + main_chunks[0].width {
+            if x < left.x + left.width {
                 self.focus = Focus::ViewList;
-            } else {
-                let right_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints([
-                        ratatui::layout::Constraint::Percentage(40),
-                        ratatui::layout::Constraint::Percentage(60),
-                    ])
-                    .split(main_chunks[1]);
-
+            } else if self.sql_mode {
                 if y < right_chunks[0].y + right_chunks[0].height {
-                    self.focus = Focus::Chart;
+                    self.focus = Focus::SqlInput;
                 } else {
                     self.focus = Focus::DataTable;
                 }
+            } else if is_md {
+                self.focus = Focus::DataTable;
+            } else if y < right_chunks[0].y + right_chunks[0].height {
+                self.focus = Focus::Chart;
+            } else {
+                self.focus = Focus::DataTable;
             }
         }
         Ok(())
     }
 
     pub fn enter_stats_view(&mut self) -> Result<()> {
+        if self.sql_mode {
+            self.close_sql_mode();
+        }
         if let (Some(ref backend), Some(ref session), Some(view)) =
             (&self.backend, &self.session, self.views.get(self.selected_view_index))
         {
@@ -525,8 +688,15 @@ impl App {
                 Ok(data) => {
                     self.view_data = Some(data);
                     self.table_scroll = 0;
+                    self.table_hscroll = 0;
+                    self.hidden_col_names.clear();
+                    self.col_highlight = None;
+                    self.row_highlight = None;
+                    self.invalidate_display_cache();
                     self.chart_scroll = 0;
                     self.error_message = None;
+                    self.sql_result = None;
+                    self.sql_error = None;
                     self.refresh_visualization();
 
                     // Initialize timeline viewport if this is a timeline view
@@ -587,8 +757,20 @@ impl App {
         full_area: ratatui::layout::Rect,
     ) {
         let is_timeline = self.current_view_is_timeline();
-        let (left, _, right_chunks) = crate::ui::layout_chunks(full_area, is_timeline);
+        let is_metadata = self.current_view_is_metadata();
+        let (left, _, right_chunks) = crate::ui::layout_chunks(full_area, is_timeline, is_metadata, self.sql_mode);
         let chart_area = right_chunks[0];
+
+        // Compute data table area
+        let data_area = if self.fullscreen == Some(Focus::DataTable) {
+            full_area
+        } else if self.sql_mode {
+            right_chunks[1]
+        } else if is_metadata {
+            right_chunks[0]
+        } else {
+            right_chunks[1]
+        };
 
         // Determine which region was clicked and set focus
         if col < left.x + left.width {
@@ -596,20 +778,64 @@ impl App {
             return;
         }
 
-        if row < chart_area.y + chart_area.height {
-            self.focus = Focus::Chart;
-        } else if is_timeline && right_chunks.len() > 2 && row < right_chunks[1].y + right_chunks[1].height {
-            self.focus = Focus::SqlInput;
-        } else if is_timeline && right_chunks.len() > 2 && row < right_chunks[2].y + right_chunks[2].height {
-            self.focus = Focus::SqlResult;
-        } else if !is_timeline && right_chunks.len() > 1 && row < right_chunks[1].y + right_chunks[1].height {
+        if self.sql_mode {
+            if row < right_chunks[0].y + right_chunks[0].height {
+                self.focus = Focus::SqlInput;
+            } else {
+                self.focus = Focus::DataTable;
+            }
+        } else if is_metadata {
             self.focus = Focus::DataTable;
+        } else if row < chart_area.y + chart_area.height {
+            self.focus = Focus::Chart;
         } else {
-            self.focus = Focus::ViewList;
+            self.focus = Focus::DataTable;
         }
 
-        // Only start timeline drag if focus is Chart and click is within the plot area
-        if self.focus == Focus::Chart {
+        // Data table interactions
+        if self.focus == Focus::DataTable && button == crossterm::event::MouseButton::Left {
+            let header_y = data_area.y + 1; // inside top border
+            let separator_y = header_y + 1; // header separator line
+            let data_start_y = separator_y + 1; // first data row
+            let data_end_y = data_area.y + data_area.height - 2; // inside bottom border
+
+            if row == header_y {
+                // Click on header — determine column using shared layout logic
+                if let Some(data) = self.cached_display_data.as_ref() {
+                    let (vis_names, widths, offsets) = crate::ui::compute_table_layout(data, data_area.width, self.table_hscroll, &self.hidden_col_names);
+                    let rel_x = col.saturating_sub(data_area.x + 1) as usize;
+                    for (vis_i, &off) in offsets.iter().enumerate() {
+                        if rel_x >= off && rel_x < off + widths[vis_i] {
+                            let name = vis_names[vis_i].clone();
+                            self.col_highlight = if self.col_highlight.as_deref() == Some(&name) {
+                                None
+                            } else {
+                                Some(name)
+                            };
+                            break;
+                        }
+                    }
+                }
+            } else if row >= data_start_y && row <= data_end_y {
+                // Click in data area — check for double-click
+                let data_row = self.table_scroll + (row - data_start_y) as usize;
+                if let Some((prev_col, prev_row, prev_time)) = self.last_click_at {
+                    if prev_col == col && prev_row == row && prev_time.elapsed() < Duration::from_millis(400) {
+                        self.row_highlight = if self.row_highlight == Some(data_row) {
+                            None
+                        } else {
+                            Some(data_row)
+                        };
+                        self.last_click_at = None;
+                        return;
+                    }
+                }
+                self.last_click_at = Some((col, row, Instant::now()));
+            }
+        }
+
+        // Only start timeline drag if focus is Chart, not in SQL mode, and click is within the plot area
+        if self.focus == Focus::Chart && !self.sql_mode {
             let Some(ref mut viewport) = self.timeline_viewport else {
                 return;
             };
@@ -655,7 +881,8 @@ impl App {
                             return self.prepared_viz.as_ref().and_then(|viz| {
                                 if let VizData::Timeline(ref prepared) = viz.data {
                                     let is_tl = self.current_view_is_timeline();
-                                    let (_, _, right_chunks) = crate::ui::layout_chunks(full_area, is_tl);
+                                    let is_md = self.current_view_is_metadata();
+                                    let (_, _, right_chunks) = crate::ui::layout_chunks(full_area, is_tl, is_md, self.sql_mode);
                                     let chart_area = right_chunks[0];
                                     let inner = chart_area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 1 });
                                     let pa = timeline::plot_area(inner);
@@ -722,7 +949,8 @@ impl App {
         }
 
         let is_tl = self.current_view_is_timeline();
-        let (_, _, right_chunks) = crate::ui::layout_chunks(full_area, is_tl);
+        let is_md = self.current_view_is_metadata();
+        let (_, _, right_chunks) = crate::ui::layout_chunks(full_area, is_tl, is_md, self.sql_mode);
         let chart_area = right_chunks[0];
         let inner = chart_area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 1 });
         let pa = timeline::plot_area(inner);
@@ -811,7 +1039,8 @@ impl App {
         };
 
         let is_tl = self.current_view_is_timeline();
-        let (_, _, right_chunks) = crate::ui::layout_chunks(full_area, is_tl);
+        let is_md = self.current_view_is_metadata();
+        let (_, _, right_chunks) = crate::ui::layout_chunks(full_area, is_tl, is_md, self.sql_mode);
         let chart_area = right_chunks[0];
         let inner = chart_area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 1 });
         let pa = timeline::plot_area(inner);

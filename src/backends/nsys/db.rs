@@ -35,18 +35,18 @@ fn get_table_meta(table_name: &str) -> TableMeta {
             default_viz: "timeline",
         };
     }
+    if tn.starts_with("TARGET_INFO_") || tn.starts_with("ANALYSIS_") || tn.starts_with("ENUM_") {
+        return TableMeta {
+            category: ViewCategory::Metadata,
+            display_name: table_name.into(),
+            default_viz: "",
+        };
+    }
     if tn.starts_with("CUPTI_") {
         return TableMeta {
             category: ViewCategory::RawData,
             display_name: table_name.into(),
             default_viz: "barchart",
-        };
-    }
-    if tn.starts_with("TARGET_INFO_") || tn.starts_with("ANALYSIS_") {
-        return TableMeta {
-            category: ViewCategory::Metadata,
-            display_name: table_name.into(),
-            default_viz: "statistics",
         };
     }
     TableMeta {
@@ -193,15 +193,33 @@ fn get_view_data_resolved(conn: &Connection, table: &str, limit: usize) -> Resul
         .filter_map(|r| r.ok())
         .collect();
 
+    // Collect name columns that reference StringIds
+    let name_cols: Vec<String> = col_info
+        .iter()
+        .filter(|(name, _typ)| {
+            let lc = name.to_lowercase();
+            lc == "nameid"
+                || lc == "name_id"
+                || lc == "demangledname"
+                || lc == "shortname"
+                || lc == "mangledname"
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+
     let schema: Vec<ColumnSchema> = col_info
         .iter()
         .map(|(name, typ)| ColumnSchema {
             name: name.clone(),
-            dtype: sqlite_type_to_column_type(typ),
+            dtype: if name_cols.contains(name) {
+                ColumnType::Text
+            } else {
+                sqlite_type_to_column_type(typ)
+            },
         })
         .collect();
 
-    // Find which column to JOIN on StringIds: prefer nameId, else demangledName/shortName
+    // Pick the primary JOIN column (prefer nameId, else demangledName, else shortName)
     let join_col = col_info
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("nameId"))
@@ -210,9 +228,32 @@ fn get_view_data_resolved(conn: &Connection, table: &str, limit: usize) -> Resul
         .map(|(name, _)| name.clone())
         .unwrap_or_else(|| "nameId".to_string());
 
+    // Build JOINs: resolve all name columns via StringIds
+    let joins: Vec<String> = name_cols
+        .iter()
+        .enumerate()
+        .map(|(i, col)| format!("LEFT JOIN StringIds s{} ON s{}.id = r.{}", i, i, col))
+        .collect();
+    let join_clause = joins.join(" ");
+
+    // Build SELECT: replace raw IDs with resolved strings, add a "name" alias for the primary column
+    let mut select_parts: Vec<String> = Vec::new();
+    for (_ci, col_name) in col_info.iter().enumerate() {
+        if let Some(ni) = name_cols.iter().position(|n| n == &col_name.0) {
+            select_parts.push(format!("s{}.value as {}", ni, col_name.0));
+        } else {
+            select_parts.push(format!("r.{}", col_name.0));
+        }
+    }
+    // Add primary name as "name" alias
+    if let Some(primary_idx) = name_cols.iter().position(|c| c == &join_col) {
+        select_parts.push(format!("s{}.value as name", primary_idx));
+    }
+
+    let select_clause = select_parts.join(", ");
     let query = format!(
-        "SELECT r.*, s.value as name FROM {} r LEFT JOIN StringIds s ON s.id = r.{} LIMIT {}",
-        table, join_col, limit
+        "SELECT {} FROM {} r {} LIMIT {}",
+        select_clause, table, join_clause, limit
     );
 
     let mut stmt = conn.prepare(&query)?;

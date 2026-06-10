@@ -1,0 +1,48 @@
+# nvis light theme — readable on light terminal backgrounds
+
+[ui]
+border_focus = "DarkGray"
+border_unfocus = ""
+header_fg = "Black"
+header_modifier = "bold"
+col_highlight_bg = "#b0d0d0"
+col_highlight_fg = "Black"
+row_highlight_bg = "#d0d0d0"
+row_highlight_fg = "Black"
+list_highlight_bg = "#d0d0d0"
+sql_error_border = "Red"
+title_fg = "Blue"
+help_bar_bg = "#e0e0e0"
+help_bar_fg = "Black"
+error_fg = "Red"
+hint_fg = "DarkGray"
+
+[timeline]
+lane_bg_even = "#f0f0f0"
+lane_bg_odd = "#e8e8e8"
+selection_bg = "#c8c8d8"
+lane_label_fg = "Gray"
+time_axis_fg = "Gray"
+kernel_colors = ["#007080", "#007040", "#000080", "#800000", "#800080", "#806000", "#c07000", "#006060"]
+memcpy_color = "#800080"
+memset_color = "#806000"
+event_fallback = "Black"
+hover_text_bg = "White"
+hover_text_fg = "Black"
+selected_text_bg = "#c8c8d8"
+info_bar_bg = "#e0e0e0"
+info_bar_fg = "Black"
+
+[boxplot]
+whisker_fg = "#007040"
+box_fg = "#007040"
+median_fg = "#806000"
+axis_fg = "Gray"
+
+[barchart]
+bar_fg = "#007040"
+bar_value_fg = "White"
+bar_value_bg = "#007040"
+
+[statistics]
+text_fg = "Black"

@@ -76,11 +76,15 @@ fn run_app<B: ratatui::backend::Backend + std::io::Write>(
     let mut mouse_captured = true;
 
     loop {
+        app.ensure_display_cache();
         terminal.draw(|f| {
             ui::draw(f, app);
         })?;
-        let size = terminal.size()?;
-        let full_area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+
+        // Show/hide blinking cursor based on SQL input focus
+        if app.focus == nvis::app::Focus::SqlInput || app.focus == nvis::app::Focus::FileInput {
+            execute!(terminal.backend_mut(), crossterm::cursor::Show)?;
+        }
 
         let event = event::read()?;
         match event {
@@ -102,6 +106,14 @@ fn run_app<B: ratatui::backend::Backend + std::io::Write>(
                         } else {
                             execute!(terminal.backend_mut(), DisableMouseCapture)?;
                         }
+                    }
+                    // Ctrl+H: toggle help bar
+                    (KeyCode::Char('h'), true, false) => {
+                        app.help_bar_visible = !app.help_bar_visible;
+                    }
+                    // Ctrl+T: cycle theme
+                    (KeyCode::Char('t'), true, false) => {
+                        app.cycle_theme();
                     }
                     // Ctrl+A: go to start of input (shell convention)
                     (KeyCode::Char('a'), true, false) => {
@@ -133,42 +145,64 @@ fn run_app<B: ratatui::backend::Backend + std::io::Write>(
                     }
                     // q: quit when not inputting, otherwise insert
                     (KeyCode::Char('q'), false, false) => {
-                        if !app.is_inputting() && !app.is_sql_inputting() {
+                        if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode {
                             return Ok(());
                         } else {
                             app.on_char('q');
                         }
                     }
-                    // s/b: only act when not inputting
-                    (KeyCode::Char('s'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
+                    // s/b: only act when not inputting or in sql mode
+                    (KeyCode::Char('s'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
                         let _ = app.enter_stats_view();
                     }
-                    (KeyCode::Char('b'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
+                    (KeyCode::Char('b'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
                         app.leave_stats_view();
                     }
-                    // Timeline zoom/pan when chart is focused and not inputting
+                    // Timeline zoom/pan when chart is focused and not inputting or in sql mode
                     (KeyCode::Char('+'), false, false) | (KeyCode::Char('='), false, false)
-                        if !app.is_inputting() && !app.is_sql_inputting() =>
+                        if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode =>
                     {
                         app.on_timeline_zoom_in();
                     }
                     (KeyCode::Char('-'), false, false) | (KeyCode::Char('_'), false, false)
-                        if !app.is_inputting() && !app.is_sql_inputting() =>
+                        if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode =>
                     {
                         app.on_timeline_zoom_out();
                     }
-                    (KeyCode::Char('h'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
+                    (KeyCode::Char('h'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
                         app.on_timeline_pan_left();
                     }
-                    (KeyCode::Char('l'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
+                    (KeyCode::Char('l'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
                         app.on_timeline_pan_right();
                     }
-                    (KeyCode::Char('r'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
+                    (KeyCode::Char('r'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
                         app.on_timeline_reset_view();
                     }
-                    // Esc always exits
+                    // / opens SQL mode
+                    (KeyCode::Char('/'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
+                        app.open_sql_mode();
+                    }
+                    // f: toggle fullscreen for current panel
+                    (KeyCode::Char('f'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
+                        app.toggle_fullscreen();
+                    }
+                    // d: hide highlighted column
+                    (KeyCode::Char('d'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
+                        app.on_hide_col();
+                    }
+                    // u: restore all hidden columns
+                    (KeyCode::Char('u'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
+                        app.on_unhide_all_cols();
+                    }
+                    // Esc: close fullscreen if active, close SQL mode if active, otherwise quit
                     (KeyCode::Esc, _, _) => {
-                        return Ok(());
+                        if app.fullscreen.is_some() {
+                            app.fullscreen = None;
+                        } else if app.sql_mode {
+                            app.close_sql_mode();
+                        } else {
+                            return Ok(());
+                        }
                     }
                     // Navigation keys
                     (KeyCode::Up, _, _) => app.on_up(),
@@ -187,6 +221,12 @@ fn run_app<B: ratatui::backend::Backend + std::io::Write>(
                             app.on_right();
                         }
                     }
+                    (KeyCode::Left, true, false) | (KeyCode::Left, false, true) => {
+                        app.on_table_hscroll_left();
+                    }
+                    (KeyCode::Right, true, false) | (KeyCode::Right, false, true) => {
+                        app.on_table_hscroll_right();
+                    }
                     (KeyCode::Home, _, _) => app.on_home(),
                     (KeyCode::End, _, _) => app.on_end(),
                     (KeyCode::Enter, _, _) => app.on_enter()?,
@@ -198,7 +238,10 @@ fn run_app<B: ratatui::backend::Backend + std::io::Write>(
                     _ => {}
                 }
             }
-            Event::Mouse(mouse) if mouse_captured => match mouse.kind {
+            Event::Mouse(mouse) if mouse_captured => {
+                let size = terminal.size()?;
+                let full_area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+                match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     app.on_mouse_down(MouseButton::Left, mouse.column, mouse.row, full_area);
                 }
@@ -245,7 +288,11 @@ fn run_app<B: ratatui::backend::Backend + std::io::Write>(
                 }
                 MouseEventKind::ScrollLeft => app.on_timeline_pan_left(),
                 MouseEventKind::ScrollRight => app.on_timeline_pan_right(),
-            },
+                }
+            }
+            Event::Paste(text) => {
+                app.on_paste(&text);
+            }
             _ => {}
         }
     }

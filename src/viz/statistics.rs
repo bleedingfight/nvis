@@ -43,19 +43,20 @@ fn generate_statistics_text(view_name: &str, data: &ProfilerData) -> String {
     text
 }
 
-fn draw_statistics_text(f: &mut Frame, area: Rect, title: &str, text: &str, focused: bool) {
+fn draw_statistics_text(f: &mut Frame, area: Rect, title: &str, text: &str, focused: bool, theme: &crate::theme::Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
         .border_style(if focused {
-            Style::default().fg(Color::Yellow)
+            crate::theme::parse_color(&theme.ui.border_focus).map_or(Style::default(), |c| Style::default().fg(c))
         } else {
-            Style::default()
+            crate::theme::parse_color(&theme.ui.border_unfocus).map_or(Style::default(), |c| Style::default().fg(c))
         });
 
+    let text_fg = crate::theme::parse_color(&theme.statistics.text_fg).unwrap_or(Color::White);
     let paragraph = Paragraph::new(text)
         .block(block)
-        .style(Style::default().fg(Color::White));
+        .style(Style::default().fg(text_fg));
     f.render_widget(paragraph, area);
 }
 
@@ -82,9 +83,9 @@ impl VizRenderer for StatisticsRenderer {
         })
     }
 
-    fn draw(&self, f: &mut Frame, area: Rect, viz: &PreparedVisualization, focused: bool) {
+    fn draw(&self, f: &mut Frame, area: Rect, viz: &PreparedVisualization, focused: bool, theme: &crate::theme::Theme) {
         if let VizData::StatsText(ref text) = &viz.data {
-            draw_statistics_text(f, area, &viz.title, text, focused);
+            draw_statistics_text(f, area, &viz.title, text, focused, theme);
         }
     }
 }
