@@ -1,6 +1,7 @@
 pub mod db;
 pub mod stats;
 pub mod detect;
+pub mod summary;
 
 use std::any::Any;
 use std::path::{Path, PathBuf};

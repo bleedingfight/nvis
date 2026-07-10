@@ -1,0 +1,69 @@
+# Catppuccin Mocha theme for nvis.
+# Official palette: https://catppuccin.com/palette
+# Base=#1e1e2e  Mantle=#181825  Crust=#11111b
+# Text=#cdd6f4  Subtext1=#bac2de  Subtext0=#a6adc8  Overlay2=#9399b2
+# Surface0=#313244  Surface1=#45475a  Surface2=#585b70
+# Rosewater=#f5e0dc  Pink=#f5c2e7  Red=#f38ba8  Maroon=#eba0ac
+# Peach=#fab387  Yellow=#f9e2af  Green=#a6e3a1  Teal=#94e2d5
+# Sky=#89dceb  Sapphire=#74c7ec  Blue=#89b4fa  Lavender=#b4befe
+# Mauve=#cba6f7  Flamingo=#f0c6c6
+
+[ui]
+border_focus = "Mauve"            # #cba6f7
+border_unfocus = "Surface1"      # #45475a
+header_fg = "Yellow"             # #f9e2af
+header_modifier = "bold"
+col_highlight_bg = "#45475a"     # Surface1
+col_highlight_fg = "#cdd6f4"     # Text
+row_highlight_bg = "#45475a"     # Surface1
+row_highlight_fg = "#cdd6f4"     # Text
+list_highlight_bg = "#313244"    # Surface0
+sql_error_border = "Red"        # #f38ba8
+title_fg = "Lavender"            # #b4befe
+help_bar_bg = "#181825"          # Mantle
+help_bar_fg = "#cdd6f4"          # Text
+error_fg = "Red"                # #f38ba8
+hint_fg = "Subtext0"            # #a6adc8
+
+[timeline]
+lane_bg_even = "#181825"         # Mantle
+lane_bg_odd = "#1e1e2e"          # Base
+selection_bg = "#45475a"         # Surface1
+lane_label_fg = "#9399b2"        # Overlay2
+time_axis_fg = "#a6adc8"          # Subtext0
+kernel_colors = ["#89b4fa", "#a6e3a1", "#cba6f7", "#f9e2af", "#f38ba8", "#94e2d5", "#fab387", "#f5c2e7"]
+memcpy_color = "#fab387"         # Peach
+memset_color = "#f9e2af"         # Yellow
+event_fallback = "#cdd6f4"       # Text
+hover_text_bg = "#cdd6f4"        # Text
+hover_text_fg = "#1e1e2e"        # Base
+selected_text_bg = "#45475a"    # Surface1
+info_bar_bg = "#181825"          # Mantle
+info_bar_fg = "#cdd6f4"          # Text
+
+[boxplot]
+whisker_fg = "#94e2d5"           # Teal
+box_fg = "#89b4fa"               # Blue
+median_fg = "#f9e2af"            # Yellow
+axis_fg = "#6c7086"              # Overlay0
+
+[barchart]
+bar_fg = "#a6e3a1"               # Green
+bar_value_fg = "#1e1e2e"        # Base
+bar_value_bg = "#a6e3a1"        # Green
+
+[statistics]
+text_fg = "#cdd6f4"              # Text
+
+[summary]
+gpu_bg = "#181825"               # Mantle
+cpu_bg = "#2a1018"               # keep a warm tint to separate CPU lanes
+lane_label_fg = "#a6adc8"        # Subtext0
+runtime_color = "#89dceb"        # Sky
+
+[browser]
+category_fg = "Lavender"         # #b4befe
+dir_fg = "#cdd6f4"               # Text
+file_fg = "#a6adc8"              # Subtext0
+highlight_bg = "#45475a"         # Surface1
+highlight_fg = "#cdd6f4"         # Text

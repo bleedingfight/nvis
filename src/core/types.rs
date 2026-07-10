@@ -93,9 +93,9 @@ impl ProfilerData {
         self.schema.iter().position(|s| s.name == name)
     }
 
-    pub fn without_all_null_columns(&self) -> ProfilerData {
+    pub fn without_all_null_columns(mut self) -> ProfilerData {
         if self.row_count == 0 || self.columns.is_empty() {
-            return self.clone();
+            return self;
         }
         let keep: Vec<usize> = self
             .columns
@@ -105,18 +105,18 @@ impl ProfilerData {
             .map(|(i, _)| i)
             .collect();
         if keep.len() == self.columns.len() {
-            return self.clone();
+            return self;
         }
         ProfilerData {
             schema: keep.iter().map(|&i| self.schema[i].clone()).collect(),
-            columns: keep.iter().map(|&i| self.columns[i].clone()).collect(),
+            columns: keep.iter().map(|&i| std::mem::take(&mut self.columns[i])).collect(),
             row_count: self.row_count,
         }
     }
 
-    pub fn without_redundant_name_columns(&self) -> ProfilerData {
+    pub fn without_redundant_name_columns(mut self) -> ProfilerData {
         let skip: Vec<usize> = self
-            .schema
+.schema
             .iter()
             .enumerate()
             .filter(|(_, s)| {
@@ -126,28 +126,25 @@ impl ProfilerData {
             .map(|(i, _)| i)
             .collect();
         if skip.is_empty() {
-            return self.clone();
+            return self;
         }
         let keep: Vec<usize> = (0..self.columns.len()).filter(|i| !skip.contains(i)).collect();
         ProfilerData {
             schema: keep.iter().map(|&i| self.schema[i].clone()).collect(),
-            columns: keep.iter().map(|&i| self.columns[i].clone()).collect(),
+            columns: keep.iter().map(|&i| std::mem::take(&mut self.columns[i])).collect(),
             row_count: self.row_count,
         }
     }
 
-    pub fn with_merged_grid_block(&self) -> ProfilerData {
+    pub fn with_merged_grid_block(mut self) -> ProfilerData {
         fn find_xyz_cols(schema: &[ColumnSchema], base: &str) -> Option<[usize; 3]> {
             let x = schema.iter().position(|s| s.name.eq_ignore_ascii_case(&format!("{base}X")))?;
             let y = schema.iter().position(|s| s.name.eq_ignore_ascii_case(&format!("{base}Y")))?;
             let z = schema.iter().position(|s| s.name.eq_ignore_ascii_case(&format!("{base}Z")))?;
             Some([x, y, z])
         }
-        fn fmt_xyz(cols: &[Vec<ColumnValue>; 3], row: usize) -> ColumnValue {
-            let x = cols[0].get(row);
-            let y = cols[1].get(row);
-            let z = cols[2].get(row);
-            match (x, y, z) {
+        fn fmt_xyz(cols: &[&Vec<ColumnValue>; 3], row: usize) -> ColumnValue {
+            match (cols[0].get(row), cols[1].get(row), cols[2].get(row)) {
                 (Some(ColumnValue::Integer(a)), Some(ColumnValue::Integer(b)), Some(ColumnValue::Integer(c))) => {
                     ColumnValue::Text(format!("({},{},{})", a, b, c))
                 }
@@ -159,7 +156,7 @@ impl ProfilerData {
         let block_xyz = find_xyz_cols(&self.schema, "block");
 
         if grid_xyz.is_none() && block_xyz.is_none() {
-            return self.clone();
+            return self;
         }
 
         let skip: Vec<usize> = [grid_xyz, block_xyz]
@@ -179,14 +176,14 @@ impl ProfilerData {
         // First: name column
         if let Some(ni) = name_col {
             new_schema.push(self.schema[ni].clone());
-            new_columns.push(self.columns[ni].clone());
+            new_columns.push(std::mem::take(&mut self.columns[ni]));
         }
 
         // Then: merged grid
-        if let Some([x, y, z]) = grid_xyz {
+ if let Some([x, y, z]) = grid_xyz {
             new_schema.push(ColumnSchema { name: "grid".into(), dtype: ColumnType::Text });
             new_columns.push((0..self.row_count)
-                .map(|r| fmt_xyz(&[self.columns[x].clone(), self.columns[y].clone(), self.columns[z].clone()], r))
+                .map(|r| fmt_xyz(&[&self.columns[x], &self.columns[y], &self.columns[z]], r))
                 .collect());
         }
 
@@ -194,16 +191,16 @@ impl ProfilerData {
         if let Some([x, y, z]) = block_xyz {
             new_schema.push(ColumnSchema { name: "block".into(), dtype: ColumnType::Text });
             new_columns.push((0..self.row_count)
-                .map(|r| fmt_xyz(&[self.columns[x].clone(), self.columns[y].clone(), self.columns[z].clone()], r))
+                .map(|r| fmt_xyz(&[&self.columns[x], &self.columns[y], &self.columns[z]], r))
                 .collect());
         }
 
         // Then: remaining columns in original order, skipping merged/split ones and name
         let all_skip: Vec<usize> = skip.iter().chain(name_col.iter()).copied().collect();
-        for (i, s) in self.schema.iter().enumerate() {
+        for (i, s) in self.schema.into_iter().enumerate() {
             if !all_skip.contains(&i) {
-                new_schema.push(s.clone());
-                new_columns.push(self.columns[i].clone());
+                new_schema.push(s);
+                new_columns.push(std::mem::take(&mut self.columns[i]));
             }
         }
 

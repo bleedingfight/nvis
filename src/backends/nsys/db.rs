@@ -305,6 +305,7 @@ fn get_view_data_resolved(conn: &Connection, table: &str, limit: usize) -> Resul
 /// Also supports sqlite3 dot-commands (.tables, .schema, etc.) by translating them to SQL.
 pub fn execute_sql(conn: &Connection, sql: &str) -> Result<ProfilerData> {
     let trimmed = sql.trim();
+    log::debug!("SQL: {}", trimmed);
     if let Some(dot_cmd) = translate_dot_command(trimmed) {
         return execute_sql(conn, &dot_cmd);
     }
@@ -457,20 +458,37 @@ fn get_memcpy_data(conn: &Connection, table: &str) -> Result<ProfilerData> {
         })
         .collect();
 
+    // Check if nameId column exists in this MEMCPY table
+    let has_name_id_col = col_info.iter().any(|(name, _)| {
+        let lc = name.to_lowercase();
+        lc == "nameid" || lc == "shortname" || lc == "demangledname"
+    });
+
+    let name_join = if has_name_id_col {
+        "LEFT JOIN StringIds s ON s.id = r.nameId"
+    } else {
+        "" // no nameId column, skip join
+    };
+    let name_select = if has_name_id_col {
+        "s.value as name,"
+    } else {
+        "'[memcpy]' as name,"
+    };
+
     let query = format!(
         "SELECT r.*, \
-         s.value as name, \
+         {} \
          ec.label as copyKind, \
          es.label as srcKind, \
          ed.label as dstKind \
          FROM {} r \
-         LEFT JOIN StringIds s ON s.id = r.nameId \
+         {} \
          LEFT JOIN ENUM_CUDA_MEMCPY_OPER ec ON ec.id = r.copyKind \
          LEFT JOIN ENUM_CUDA_MEM_KIND es ON es.id = r.srcKind \
          LEFT JOIN ENUM_CUDA_MEM_KIND ed ON ed.id = r.dstKind \
          ORDER BY r.start \
          LIMIT 50000",
-        table
+        name_select, table, name_join
     );
 
     let mut stmt = conn.prepare(&query)?;

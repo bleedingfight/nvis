@@ -15,6 +15,10 @@ pub struct Theme {
     pub barchart: BarChartTheme,
     #[serde(default)]
     pub statistics: StatisticsTheme,
+    #[serde(default)]
+    pub summary: SummaryTheme,
+    #[serde(default)]
+    pub browser: BrowserTheme,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,6 +115,44 @@ pub struct StatisticsTheme {
     pub text_fg: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct SummaryTheme {
+    #[serde(default = "default_gpu_bg")]
+    pub gpu_bg: String,
+    #[serde(default = "default_cpu_bg")]
+    pub cpu_bg: String,
+    #[serde(default = "default_gray")]
+    pub lane_label_fg: String,
+    #[serde(default = "default_cyan")]
+    pub runtime_color: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BrowserTheme {
+    #[serde(default = "default_cyan")]
+    pub category_fg: String,
+    #[serde(default = "default_white")]
+    pub dir_fg: String,
+    #[serde(default = "default_gray")]
+    pub file_fg: String,
+    #[serde(default = "default_row_hl_bg")]
+    pub highlight_bg: String,
+    #[serde(default = "default_white")]
+    pub highlight_fg: String,
+}
+
+impl Default for BrowserTheme {
+    fn default() -> Self {
+        Self {
+            category_fg: default_cyan(),
+            dir_fg: default_white(),
+            file_fg: default_gray(),
+            highlight_bg: default_row_hl_bg(),
+            highlight_fg: default_white(),
+        }
+    }
+}
+
 impl Default for Theme {
     fn default() -> Self {
         Self {
@@ -119,6 +161,8 @@ impl Default for Theme {
             boxplot: BoxPlotTheme::default(),
             barchart: BarChartTheme::default(),
             statistics: StatisticsTheme::default(),
+            summary: SummaryTheme::default(),
+            browser: BrowserTheme::default(),
         }
     }
 }
@@ -191,6 +235,17 @@ impl Default for StatisticsTheme {
     fn default() -> Self {
         Self {
             text_fg: default_white(),
+        }
+    }
+}
+
+impl Default for SummaryTheme {
+    fn default() -> Self {
+        Self {
+            gpu_bg: default_gpu_bg(),
+            cpu_bg: default_cpu_bg(),
+            lane_label_fg: default_gray(),
+            runtime_color: default_cyan(),
         }
     }
 }
@@ -321,3 +376,6 @@ fn theme_dirs() -> Vec<PathBuf> {
 
     dirs
 }
+
+fn default_gpu_bg() -> String { "#141929".into() }
+fn default_cpu_bg() -> String { "#2d1414".into() }

@@ -37,9 +37,47 @@ nvis /path/to/profile.sqlite
 nvis /path/to/ncu_report.csv
 nvis /path/to/trace.json
 
+# Open a remote file over SSH (downloads a local copy first)
+nvis 'ssh:user@host:/data/profile.sqlite'
+nvis 'ssh://host:2222/data/report.csv'
+
 # Start with file selection UI
 nvis
 ```
+
+### Remote Files
+
+nvis transparently resolves remote file URIs by downloading a local copy
+via the appropriate tool (`scp` for SSH, `curl` for WebDAV/HTTP). The temp
+file preserves the original extension for backend detection and is cleaned
+up automatically when nvis exits.
+
+**SSH** (`scp`):
+
+| Format | Example |
+|--------|---------|
+| `ssh:[user@]host:/path` | `ssh:alice@gpu01:/data/prof.sqlite` |
+| `ssh:[user@]host:port:/path` | `ssh:gpu01:2222:/data/prof.csv` |
+| `ssh://[user@]host[:port]/path` | `ssh://alice@gpu01:2222/data/prof.json` |
+| `scp:` alias | `scp:alice@gpu01:/data/prof.sqlite` |
+
+- Requires key-based auth (or ssh-agent); `scp` runs in batch mode (`-B`)
+- `~/.ssh/config` host aliases work
+
+**WebDAV / HTTP** (`curl`):
+
+| Format | Example |
+|--------|---------|
+| `webdav://host/path` | `webdav://nas.local/data/prof.sqlite` |
+| `webdavs://host/path` | `webdavs://nas.local/data/prof.csv` |
+| `http://` / `https://` | `https://server/report.json` |
+
+- Auth via `NVIS_WEBDAV_USER` / `NVIS_WEBDAV_PASS` env vars, `~/.netrc`,
+  or URL-embedded credentials
+- Follows redirects (`curl -L`)
+
+**Adding new sources** — implement the `Source` trait in `src/source/`
+and register it in `source::register_all()`. See [Architecture](#architecture).
 
 ### Step-by-step
 
@@ -141,6 +179,7 @@ cargo build --release --no-default-features --features "nsys,ncu"
 src/
   core/         — traits (ProfilerBackend, ProfilerSession, VizRenderer) + Registry
   backends/     — nsys, ncu, torch implementations
+  source/       — file source abstraction (local / ssh / webdav) + Registry
   viz/          — boxplot, timeline, barchart, statistics renderers
   app.rs        — App state machine (generic over any backend)
   ui.rs         — TUI rendering (dispatches to VizRenderer::draw)
@@ -152,6 +191,11 @@ To add a new profiler backend:
 2. Create a `ProfilerSession` implementation holding your parsed data
 3. Register it in `backends::register_all()`
 4. Done — no changes to `app.rs`, `ui.rs`, or `viz/`
+
+To add a new file source (e.g. S3, GCS):
+1. Create `src/source/your_source.rs` implementing `Source`
+2. Register it in `source::register_all()` (before `LocalSource`)
+3. Done — `app.rs` picks it up automatically via `SourceRegistry`
 
 ## Technical Details
 

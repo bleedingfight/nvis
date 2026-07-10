@@ -10,11 +10,46 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 
-use nvis::app::App;
+use nvis::app::{App, AppState, Focus};
 use nvis::ui;
 use std::env;
 
+fn init_logging() {
+    let log_path = dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("nvis")
+        .join("nvis.log");
+
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let file = match std::fs::File::create(&log_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Warning: cannot create log file {:?}: {}", log_path, e);
+            return;
+        }
+    };
+
+    let level = if env::var("NVIS_LOG").is_ok() {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
+
+    env_logger::Builder::new()
+        .target(env_logger::Target::Pipe(Box::new(file)))
+        .filter_level(level)
+        .format_timestamp_secs()
+        .init();
+
+    log::info!("nvis started, log file: {:?}", log_path);
+}
+
 fn main() -> Result<()> {
+    init_logging();
+
     enable_raw_mode()?;
 
     // Set up panic hook to restore terminal before printing backtrace
@@ -86,6 +121,18 @@ fn run_app<B: ratatui::backend::Backend + std::io::Write>(
             execute!(terminal.backend_mut(), crossterm::cursor::Show)?;
         }
 
+        // Non-blocking poll: while a download is in flight, advance progress
+        // every 200ms (redraw happens at the top of the loop). Otherwise a
+        // download would freeze the UI until a key is pressed.
+        if app.download_state.is_some() {
+            if event::poll(std::time::Duration::from_millis(200))? {
+                // an event arrived; fall through to read+handle it below
+            } else {
+                app.tick_download();
+                continue; // redraw + poll again
+            }
+        }
+
         let event = event::read()?;
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -145,61 +192,105 @@ fn run_app<B: ratatui::backend::Backend + std::io::Write>(
                     }
                     // q: quit when not inputting, otherwise insert
                     (KeyCode::Char('q'), false, false) => {
-                        if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode {
+                        if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode && !app.cloud_dialog_active {
                             return Ok(());
                         } else {
                             app.on_char('q');
                         }
                     }
-                    // s/b: only act when not inputting or in sql mode
-                    (KeyCode::Char('s'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
+                    // s/b: only act when not inputting or in sql mode or cloud dialog
+                    (KeyCode::Char('s'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode && !app.cloud_dialog_active => {
                         let _ = app.enter_stats_view();
                     }
-                    (KeyCode::Char('b'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
-                        app.leave_stats_view();
+                    (KeyCode::Char('b'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode && !app.cloud_dialog_active => {
+                        if app.state == AppState::Summary {
+                            app.leave_summary();
+                        } else {
+                            app.leave_stats_view();
+                        }
                     }
-                    // Timeline zoom/pan when chart is focused and not inputting or in sql mode
+                    // m: enter summary page
+                    (KeyCode::Char('m'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode && !app.cloud_dialog_active => {
+                        if let Err(e) = app.enter_summary() {
+                            app.error_message = Some(format!("Summary failed: {}", e));
+                        }
+                    }
+                    // Timeline zoom/pan when chart is focused and not inputting or in sql mode or summary or cloud dialog
                     (KeyCode::Char('+'), false, false) | (KeyCode::Char('='), false, false)
-                        if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode =>
+                        if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode && !app.cloud_dialog_active && app.state != AppState::Summary =>
                     {
                         app.on_timeline_zoom_in();
                     }
                     (KeyCode::Char('-'), false, false) | (KeyCode::Char('_'), false, false)
-                        if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode =>
+                        if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode && !app.cloud_dialog_active && app.state != AppState::Summary =>
                     {
                         app.on_timeline_zoom_out();
                     }
-                    (KeyCode::Char('h'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
+                    (KeyCode::Char('h'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode && !app.cloud_dialog_active && app.state != AppState::Summary => {
                         app.on_timeline_pan_left();
                     }
-                    (KeyCode::Char('l'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
+                    (KeyCode::Char('l'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode && !app.cloud_dialog_active && app.state != AppState::Summary => {
                         app.on_timeline_pan_right();
                     }
-                    (KeyCode::Char('r'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
+                    (KeyCode::Char('r'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode && !app.cloud_dialog_active && app.state != AppState::Summary => {
                         app.on_timeline_reset_view();
                     }
+                    // Summary zoom/pan when in Summary state
+                    (KeyCode::Char('+'), false, false) | (KeyCode::Char('='), false, false)
+                        if app.state == AppState::Summary =>
+                    {
+                        app.on_summary_zoom_in();
+                    }
+                    (KeyCode::Char('-'), false, false) | (KeyCode::Char('_'), false, false)
+                        if app.state == AppState::Summary =>
+                    {
+                        app.on_summary_zoom_out();
+                    }
+                    (KeyCode::Left, false, false) if app.state == AppState::Summary => {
+                        app.on_summary_pan_left();
+                    }
+                    (KeyCode::Right, false, false) if app.state == AppState::Summary => {
+                        app.on_summary_pan_right();
+                    }
+                    (KeyCode::Char('r'), false, false) if app.state == AppState::Summary => {
+                        app.on_summary_reset_view();
+                    }
                     // / opens SQL mode
-                    (KeyCode::Char('/'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
+                    (KeyCode::Char('/'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.cloud_dialog_active => {
                         app.open_sql_mode();
                     }
                     // f: toggle fullscreen for current panel
-                    (KeyCode::Char('f'), false, false) if !app.is_inputting() && !app.is_sql_inputting() => {
+                    (KeyCode::Char('f'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.cloud_dialog_active => {
                         app.toggle_fullscreen();
                     }
                     // d: hide highlighted column
-                    (KeyCode::Char('d'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
+                    (KeyCode::Char('d'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode && !app.cloud_dialog_active => {
                         app.on_hide_col();
                     }
                     // u: restore all hidden columns
-                    (KeyCode::Char('u'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode => {
+                    (KeyCode::Char('u'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode && !app.cloud_dialog_active => {
                         app.on_unhide_all_cols();
                     }
-                    // Esc: close fullscreen if active, close SQL mode if active, otherwise quit
+                    // n: rename selected saved cloud connection (browser tree only)
+                    (KeyCode::Char('n'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode && !app.cloud_dialog_active && app.state == AppState::FileSelection && app.focus == Focus::BrowserTree => {
+                        app.rename_selected_cloud_conn();
+                    }
+                    // x: delete selected saved cloud connection (browser tree only, 2-step confirm)
+                    (KeyCode::Char('x'), false, false) if !app.is_inputting() && !app.is_sql_inputting() && !app.sql_mode && !app.cloud_dialog_active && app.state == AppState::FileSelection && app.focus == Focus::BrowserTree => {
+                        app.delete_selected_cloud_conn();
+                    }
+                    // Esc: close cloud dialog, close fullscreen, close SQL mode, back in browser, otherwise quit
                     (KeyCode::Esc, _, _) => {
-                        if app.fullscreen.is_some() {
+                        if app.cloud_dialog_active {
+                            app.close_cloud_dialog();
+                        } else if app.fullscreen.is_some() {
                             app.fullscreen = None;
                         } else if app.sql_mode {
                             app.close_sql_mode();
+                        } else if app.state == AppState::FileSelection
+                            && app.focus == Focus::BrowserTree
+                        {
+                            let _ = app.browser_tree_left();
                         } else {
                             return Ok(());
                         }
@@ -208,14 +299,14 @@ fn run_app<B: ratatui::backend::Backend + std::io::Write>(
                     (KeyCode::Up, _, _) => app.on_up(),
                     (KeyCode::Down, _, _) => app.on_down(),
                     (KeyCode::Left, false, false) => {
-                        if app.is_inputting() || app.is_sql_inputting() {
+                        if app.is_inputting() || app.is_sql_inputting() || (app.cloud_dialog_active && app.focus == Focus::CloudDialog) {
                             app.on_input_left();
                         } else if !shift {
                             app.on_left();
                         }
                     }
                     (KeyCode::Right, false, false) => {
-                        if app.is_inputting() || app.is_sql_inputting() {
+                        if app.is_inputting() || app.is_sql_inputting() || (app.cloud_dialog_active && app.focus == Focus::CloudDialog) {
                             app.on_input_right();
                         } else if !shift {
                             app.on_right();
@@ -227,13 +318,27 @@ fn run_app<B: ratatui::backend::Backend + std::io::Write>(
                     (KeyCode::Right, true, false) | (KeyCode::Right, false, true) => {
                         app.on_table_hscroll_right();
                     }
-                    (KeyCode::Home, _, _) => app.on_home(),
-                    (KeyCode::End, _, _) => app.on_end(),
+                    (KeyCode::Home, _, _) => {
+                        if app.cloud_dialog_active && app.focus == Focus::CloudDialog {
+                            app.on_input_ctrl_a();
+                        } else {
+                            app.on_home();
+                        }
+                    }
+                    (KeyCode::End, _, _) => {
+                        if app.cloud_dialog_active && app.focus == Focus::CloudDialog {
+                            app.on_input_ctrl_e();
+                        } else {
+                            app.on_end();
+                        }
+                    }
                     (KeyCode::Enter, _, _) => app.on_enter()?,
                     (KeyCode::Tab, _, _) => app.on_tab(),
                     // Regular char input (no modifiers)
                     (KeyCode::Char(c), false, false) => app.on_char(c),
-                    (KeyCode::Backspace, _, _) => app.on_backspace(),
+                    (KeyCode::Backspace, _, _) => {
+                        app.on_backspace();
+                    }
                     (KeyCode::Delete, _, _) => app.on_delete(),
                     _ => {}
                 }
@@ -273,21 +378,37 @@ fn run_app<B: ratatui::backend::Backend + std::io::Write>(
                     app.on_mouse_move(mouse.column, mouse.row, full_area);
                 }
                 MouseEventKind::ScrollDown => {
-                    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    if app.state == AppState::Summary {
+                        app.on_summary_zoom_out();
+                    } else if mouse.modifiers.contains(KeyModifiers::SHIFT) {
                         app.on_timeline_pan_right();
                     } else {
                         app.on_scroll_down();
                     }
                 }
                 MouseEventKind::ScrollUp => {
-                    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    if app.state == AppState::Summary {
+                        app.on_summary_zoom_in();
+                    } else if mouse.modifiers.contains(KeyModifiers::SHIFT) {
                         app.on_timeline_pan_left();
                     } else {
                         app.on_scroll_up();
                     }
                 }
-                MouseEventKind::ScrollLeft => app.on_timeline_pan_left(),
-                MouseEventKind::ScrollRight => app.on_timeline_pan_right(),
+                MouseEventKind::ScrollLeft => {
+                    if app.state == AppState::Summary {
+                        app.on_summary_pan_left();
+                    } else {
+                        app.on_timeline_pan_left();
+                    }
+                }
+                MouseEventKind::ScrollRight => {
+                    if app.state == AppState::Summary {
+                        app.on_summary_pan_right();
+                    } else {
+                        app.on_timeline_pan_right();
+                    }
+                }
                 }
             }
             Event::Paste(text) => {
